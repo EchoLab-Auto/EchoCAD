@@ -1,0 +1,34 @@
+{
+  "name": "echicad-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-log": "^2.0.0",
+    "pinia": "^2.2.0",
+    "three": "^0.167.0",
+    "vue": "^3.4.0",
+    "vue-router": "^4.4.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@types/node": "^20.0.0",
+    "@types/three": "^0.167.0",
+    "@vitejs/plugin-vue": "^5.2.4",
+    "typescript": "^5.5.0",
+    "vite": "^6.4.3",
+    "vue-tsc": "^2.2.12"
+  },
+  "allowScripts": {
+    "vue-demi@0.14.10": true,
+    "fsevents@2.3.3": true,
+    "esbuild@0.25.12": true
+  }
+}

@@ -1,0 +1,19 @@
+[package]
+name = "echi-plugin-cycloidal"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+echi-core = { path = "../echi-core" }
+echi-plugin = { path = "../echi-plugin" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+echi-geom = { path = "../echi-geom" }

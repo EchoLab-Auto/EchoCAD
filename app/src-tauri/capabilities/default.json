@@ -1,0 +1,12 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/schema.json",
+  "identifier": "default",
+  "description": "Default capabilities for EchoCAD",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "log:default",
+    "dialog:default",
+    "fs:default"
+  ]
+}

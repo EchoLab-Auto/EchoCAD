@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/echi-core",
+    "crates/echi-geom",
+    "crates/echi-render",
+    "crates/echi-io",
+    "crates/echi-plugin",
+    "crates/echi-plugin-gear",
+    "crates/echi-plugin-cycloidal",
+    "app/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["EchoCAD Team"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/EchoLab-Auto/EchoCAD"
+rust-version = "1.95"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+log = "0.4"
+
+# Tauri 2.0
+tauri = { version = "2", features = [] }
+tauri-build = { version = "2", features = [] }
+tauri-plugin-log = "2"
