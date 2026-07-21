@@ -196,3 +196,104 @@ fn angle_at_vertex(
     let dot = (e1.0 * e2.0 + e1.1 * e2.1 + e1.2 * e2.2) / (len1 * len2);
     dot.clamp(-1.0, 1.0).acos()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extrude::extrude;
+    use echi_core::feature::{ExtrudeDirection, PlaneDefinition};
+    use echi_core::sketch::Sketch;
+
+    fn make_cube_mesh() -> Mesh {
+        let mut sketch = Sketch::new();
+        let p0 = sketch.add_point(0.0, 0.0);
+        let p1 = sketch.add_point(1.0, 0.0);
+        let p2 = sketch.add_point(1.0, 1.0);
+        let p3 = sketch.add_point(0.0, 1.0);
+        sketch.add_line(p0, p1);
+        sketch.add_line(p1, p2);
+        sketch.add_line(p2, p3);
+        sketch.add_line(p3, p0);
+        extrude(&sketch, 1.0, ExtrudeDirection::OneSide, 0.0, &PlaneDefinition::XY)
+            .expect("should extrude cube for shell test")
+    }
+
+    #[test]
+    fn shell_cube_thickness_01() {
+        let cube = make_cube_mesh();
+        let shelled = shell_mesh(&cube, 0.1);
+        // Shelled mesh should have more vertices than the input (inner + outer + side walls)
+        assert!(shelled.vertex_count() > cube.vertex_count());
+        assert!(shelled.vertex_count() >= cube.vertex_count() * 2);
+        assert!(!shelled.indices.is_empty());
+        let vc = shelled.vertex_count() as u32;
+        for &idx in &shelled.indices {
+            assert!(idx < vc, "index {} out of bounds", idx);
+        }
+    }
+
+    #[test]
+    fn shell_zero_thickness_returns_clone() {
+        let cube = make_cube_mesh();
+        let shelled = shell_mesh(&cube, 0.0);
+        // Zero or negative thickness returns the input mesh as a clone
+        assert_eq!(shelled.vertex_count(), cube.vertex_count());
+    }
+
+    #[test]
+    fn shell_negative_thickness_returns_clone() {
+        let cube = make_cube_mesh();
+        let shelled = shell_mesh(&cube, -0.5);
+        // Negative thickness also returns clone (same code path as zero)
+        assert_eq!(shelled.vertex_count(), cube.vertex_count());
+    }
+
+    #[test]
+    fn shell_positive_thickness_produces_valid_mesh() {
+        let cube = make_cube_mesh();
+        let thickness = 0.2;
+        let shelled = shell_mesh(&cube, thickness);
+        // Should have roughly 2x vertices (outer + inner copies)
+        assert!(shelled.vertex_count() >= cube.vertex_count() * 2);
+        // Verify at least one inner vertex is offset inward from the outer surface
+        // Outer surface has vertices at z=0 and z=1; inner should be offset inward
+        let outer_z_min = cube.positions.chunks(3).map(|v| v[2]).fold(f32::MAX, f32::min);
+        let inner_start = cube.vertex_count();
+        let inner_z_min = shelled.positions[inner_start * 3..]
+            .chunks(3)
+            .map(|v| v[2])
+            .fold(f32::MAX, f32::min);
+        // Inner vertices should be offset inward (positive Z min should be > outer Z min)
+        assert!(inner_z_min > outer_z_min - 0.001,
+            "inner shell should be offset inward; outer_z_min={}, inner_z_min={}",
+            outer_z_min, inner_z_min);
+    }
+
+    #[test]
+    fn shell_no_nan_invariant() {
+        let cube = make_cube_mesh();
+        let shelled = shell_mesh(&cube, 0.15);
+        assert!(shelled.vertex_count() > 0);
+        assert!(!shelled.indices.is_empty());
+        for &v in &shelled.positions {
+            assert!(!v.is_nan(), "NaN in positions");
+        }
+        for &n in &shelled.normals {
+            assert!(!n.is_nan(), "NaN in normals");
+        }
+        let vc = shelled.vertex_count() as u32;
+        for &idx in &shelled.indices {
+            assert!(idx < vc, "index {} out of bounds", idx);
+        }
+    }
+
+    #[test]
+    fn shell_indices_in_bounds() {
+        let cube = make_cube_mesh();
+        let shelled = shell_mesh(&cube, 0.3);
+        let vc = shelled.vertex_count() as u32;
+        for &idx in &shelled.indices {
+            assert!(idx < vc, "index {} out of bounds (vertex_count {})", idx, vc);
+        }
+    }
+}

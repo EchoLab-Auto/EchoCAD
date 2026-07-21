@@ -102,8 +102,57 @@ pub enum Constraint {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Sketch {
     next_id: u64,
+    #[serde(with = "serde_entities")]
     pub entities: HashMap<EntityId, SketchEntity>,
     pub constraints: Vec<Constraint>,
+}
+
+/// Serde helper for `Sketch.entities`.  serde_json serializes `HashMap<u64, V>`
+/// keys as strings (`"1"`, `"2"`, …), but `EntityId(u64)` is a newtype and
+/// its derived `Deserialize` expects a numeric key.  This module bridges the
+/// gap: serialise via `u64`, deserialise by collecting string keys and
+/// parsing them back to `EntityId`.
+mod serde_entities {
+    use super::{EntityId, SketchEntity};
+    use serde::de::{MapAccess, Visitor};
+    use serde::ser::SerializeMap;
+    use serde::{Deserializer, Serializer};
+    use std::collections::HashMap;
+    use std::fmt;
+    use std::marker::PhantomData;
+
+    pub fn serialize<S: Serializer>(
+        map: &HashMap<EntityId, SketchEntity>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut m = s.serialize_map(Some(map.len()))?;
+        for (k, v) in map {
+            m.serialize_entry(&k.0, v)?;
+        }
+        m.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<HashMap<EntityId, SketchEntity>, D::Error> {
+        struct EntitiesVisitor;
+        impl<'de> Visitor<'de> for EntitiesVisitor {
+            type Value = HashMap<EntityId, SketchEntity>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a map with integer-string keys (serde_json serialized u64 keys as strings)")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
+                let mut map = HashMap::with_capacity(access.size_hint().unwrap_or(0));
+                while let Some(key_str) = access.next_key::<String>()? {
+                    let id: u64 = key_str.parse().map_err(serde::de::Error::custom)?;
+                    let val = access.next_value()?;
+                    map.insert(EntityId(id), val);
+                }
+                Ok(map)
+            }
+        }
+        d.deserialize_map(EntitiesVisitor)
+    }
 }
 
 impl Sketch {

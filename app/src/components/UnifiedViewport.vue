@@ -6,7 +6,6 @@
     @mousemove="onMouseMove"
     @mouseup="onMouseUp"
     @mouseleave="onMouseLeave"
-    @wheel="onWheel"
     @contextmenu.prevent="onRightClick"
     @dblclick="onDoubleClick"
   >
@@ -63,16 +62,17 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, watch, ref } from "vue";
+import { computed, onMounted, onUnmounted, watch } from "vue";
 import * as THREE from "three";
 import {
   getAllSolidMeshes,
   getSketchEntities, getSketchConstraints,
   addPoint, addLine, addCircle, addArc, addSpline, addEllipse,
-  solveSketch, movePoint,
+  addConstraint, solveSketch, movePoint, deleteEntity,
   type RenderMesh, type EntityId,
 } from "@/commands/sketch";
 import { useSketchStore } from "@/stores/sketch";
+import { useToastStore } from "@/stores/toast";
 import DimensionOverlay from "@/components/DimensionOverlay.vue";
 import {
   useThreeScene,
@@ -90,9 +90,14 @@ import {
 
 const emit = defineEmits<{
   (e: "faceSelected", featureId: number, faceIndex: number): void;
+  /** Emitted when the user finishes dragging a point. M9 should listen for
+   *  this and call unifiedViewport.value?.refreshViewport() to keep the
+   *  solid mesh in sync after sketch edits. */
+  (e: "drag-end"): void;
 }>();
 
 const store = useSketchStore();
+const toast = useToastStore();
 
 // ── Three.js scene ──────────────────────────────────────────────
 const {
@@ -117,16 +122,16 @@ let sketchPreviewCircle: THREE.Line | null = null;
 
 // ── Drawing state ───────────────────────────────────────────────
 const state = createSketchState();
-const { activeSnap, hoverSketch } = state;
+const { activeSnap, hoverSketch, pendingPointIds } = state;
 
 const isSketchMode = computed(() => store.isEditingSketch());
 const isDrawing = computed(() => isSketchMode.value && store.activeTool !== "select" && store.activeTool !== "plugin");
-const isDrawingLine = computed(() => store.activeTool === "line" && state.lineStartId.value !== null);
+const isDrawingLine = computed(() => store.activeTool === "line" && (state.lineStartId.value !== null || state.lineStartPos.value !== null));
 const currentToolLabel = computed(() => toolLabel(store.activeTool));
 
 const snappedAngle = computed(() => {
   if (!isDrawingLine.value) return null;
-  const start = getPointCoords(state.lineStartId.value!);
+  const start = getLineStartCoords();
   if (!start) return null;
   const target = activeSnap.value?.world ?? hoverSketch.value;
   const dx = target.x - start.x;
@@ -153,8 +158,8 @@ const snapLabel = computed(() => activeSnap.value ? SNAP_LABELS[activeSnap.value
 /// Live radius readout while drawing a circle (second click pending).
 const circleRadiusDisplay = computed(() => {
   if (store.activeTool !== "circle") return null;
-  if (state.circleCenterId.value === null) return null;
-  const center = getPointCoords(state.circleCenterId.value);
+  if (state.circleCenterId.value === null && state.circleCenterPos.value === null) return null;
+  const center = getCircleCenterCoords();
   if (!center) return null;
   const target = activeSnap.value?.world ?? hoverSketch.value;
   const r = Math.hypot(target.x - center.x, target.y - center.y);
@@ -432,36 +437,51 @@ function clearSolids() {
 }
 
 async function refreshViewport() {
-  const entries = await getAllSolidMeshes();
-  if (!ctx.value) return;
-  clearSolids();
+  try {
+    const entries = await getAllSolidMeshes();
+    if (!ctx.value) return;
+    clearSolids();
 
-  for (let i = 0; i < entries.length; i++) {
-    const e = entries[i];
-    const geo = buildGeometry(e.mesh);
-    const color = SOLID_COLORS[i % SOLID_COLORS.length];
-    const mat = new THREE.MeshStandardMaterial({
-      color,
-      roughness: 0.35,
-      metalness: 0.05,
-      side: THREE.DoubleSide,
-      wireframe: wireframe.value,
-    });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.name = e.name;
-    mesh.userData = { featureId: e.feature_id };
-    ctx.value.scene.add(mesh);
-    solidMeshes.push(mesh);
+    // Build a feature-id -> hex-color map from the store's featureColors
+    // and from FeatureNode.color (for future backend persistence).
+    const colorMap: Record<number, string> = { ...store.featureColors };
+    for (const f of store.features) {
+      if (f.color && !colorMap[f.id]) {
+        colorMap[f.id] = f.color;
+      }
+    }
 
-    const edgeGeo = new THREE.EdgesGeometry(geo, 15);
-    const edgeMat = new THREE.LineBasicMaterial({ color: 0x111111, transparent: true, opacity: 0.4 });
-    const line = new THREE.LineSegments(edgeGeo, edgeMat);
-    line.visible = showEdges.value;
-    ctx.value.scene.add(line);
-    edgeLines.push(line);
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i];
+      const geo = buildGeometry(e.mesh);
+      const defaultColor = SOLID_COLORS[i % SOLID_COLORS.length];
+      const hexColor = colorMap[e.feature_id];
+      const color = hexColor ? parseInt(hexColor.replace("#", ""), 16) : defaultColor;
+      const mat = new THREE.MeshStandardMaterial({
+        color,
+        roughness: 0.35,
+        metalness: 0.05,
+        side: THREE.DoubleSide,
+        wireframe: wireframe.value,
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.name = e.name;
+      mesh.userData = { featureId: e.feature_id };
+      ctx.value.scene.add(mesh);
+      solidMeshes.push(mesh);
+
+      const edgeGeo = new THREE.EdgesGeometry(geo, 15);
+      const edgeMat = new THREE.LineBasicMaterial({ color: 0x111111, transparent: true, opacity: 0.4 });
+      const line = new THREE.LineSegments(edgeGeo, edgeMat);
+      line.visible = showEdges.value;
+      ctx.value.scene.add(line);
+      edgeLines.push(line);
+    }
+
+    if (solidMeshes.length > 0) fitSceneView(solidMeshes);
+  } catch (err) {
+    toast.error("刷新视口失败: " + String(err));
   }
-
-  if (solidMeshes.length > 0) fitSceneView(solidMeshes);
 }
 
 // ── View commands exposed to template ──────────────────────────
@@ -606,132 +626,194 @@ async function handleDrawingMouseDown(sketch: { x: number; y: number }) {
   switch (store.activeTool) {
     case "line": {
       const hit = findPointAt(store.entities, world.x, world.y);
-      if (state.lineStartId.value === null) {
-        if (hit) state.lineStartId.value = hit;
-        else {
-          const id = await addPoint(world.x, world.y);
-          if (id !== null) {
-            state.lineStartId.value = id;
-            await refreshSketch();
-          }
+      if (state.lineStartId.value === null && state.lineStartPos.value === null) {
+        // First click: defer point creation. Snap to existing point or store
+        // position to be committed on the second click.
+        if (hit) {
+          state.lineStartId.value = hit;
+        } else {
+          state.lineStartPos.value = { x: world.x, y: world.y };
         }
       } else {
-        const start = getPointCoords(state.lineStartId.value);
-        const endWorld = start ? snapAngle(start, world, true) : world;
-        let endId = hit;
-        if (!endId) {
-          const newId = await addPoint(endWorld.x, endWorld.y);
-          if (newId === null) return;
-          endId = newId;
+        // Second click: commit the start point (if deferred), then the end
+        // point, then the line.
+        try {
+          let startId = state.lineStartId.value;
+          if (startId === null && state.lineStartPos.value) {
+            const id = await addTrackedPoint(state.lineStartPos.value.x, state.lineStartPos.value.y);
+            if (id === null) { resetDrawingState(state); return; }
+            startId = id;
+            state.lineStartId.value = id;
+          }
+          const start = getLineStartCoords();
+          if (!start || startId === null) { resetDrawingState(state); return; }
+          const endWorld = snapAngle(start, world, true);
+          let endId = hit;
+          if (!endId) {
+            const newId = await addTrackedPoint(endWorld.x, endWorld.y);
+            if (newId === null) { resetDrawingState(state); return; }
+            endId = newId;
+          }
+          await addLine(startId, endId);
+          // Points are now referenced by the line — clear tracking.
+          pendingPointIds.value = [];
+          state.lineStartId.value = endId;
+          state.lineStartPos.value = null;
+          await refreshSketch();
+        } catch (err) {
+          toast.error("绘制直线失败: " + String(err));
+          await cleanupPendingPoints();
+          resetDrawingState(state);
+          clearSketchPreviews();
         }
-        await addLine(state.lineStartId.value, endId);
-        state.lineStartId.value = endId;
-        await refreshSketch();
       }
       break;
     }
     case "circle": {
-      if (state.circleCenterId.value === null) {
+      if (state.circleCenterId.value === null && state.circleCenterPos.value === null) {
+        // First click: defer center point creation.
         const centerHit = findPointAt(store.entities, world.x, world.y);
         if (centerHit) {
           state.circleCenterId.value = centerHit;
         } else {
-          const newId = await addPoint(world.x, world.y);
-          if (newId === null) return;
-          state.circleCenterId.value = newId;
-          // Refresh so store.entities contains the new center — otherwise
-          // getPointCoords() returns null on the next click and the circle
-          // is silently discarded.
-          await refreshSketch();
+          state.circleCenterPos.value = { x: world.x, y: world.y };
         }
         drawCirclePreview(world, 0.1);
       } else {
-        const center = getPointCoords(state.circleCenterId.value);
-        if (center) {
-          const r = Math.hypot(world.x - center.x, world.y - center.y);
-          // Reject degenerate circles (e.g., accidental double-click at the center).
-          if (r > 0.01) {
-            await addCircle(state.circleCenterId.value, r);
+        // Second click: commit center point (if deferred), then create circle.
+        try {
+          if (state.circleCenterId.value === null && state.circleCenterPos.value) {
+            const id = await addTrackedPoint(state.circleCenterPos.value.x, state.circleCenterPos.value.y);
+            if (id === null) { resetDrawingState(state); return; }
+            state.circleCenterId.value = id;
           }
+          const center = getCircleCenterCoords();
+          if (center && state.circleCenterId.value !== null) {
+            const r = Math.hypot(world.x - center.x, world.y - center.y);
+            if (r > 0.01) {
+              await addCircle(state.circleCenterId.value, r);
+            }
+          }
+          // Center point is now referenced by the circle — clear tracking.
+          pendingPointIds.value = [];
+          state.circleCenterId.value = null;
+          state.circleCenterPos.value = null;
+          clearSketchPreviews();
+          await refreshSketch();
+        } catch (err) {
+          toast.error("绘制圆失败: " + String(err));
+          await cleanupPendingPoints();
+          resetDrawingState(state);
+          clearSketchPreviews();
         }
-        state.circleCenterId.value = null;
-        clearSketchPreviews();
-        await refreshSketch();
       }
       break;
     }
     case "arc": {
-      if (state.arcCenterId.value === null) {
+      if (state.arcCenterId.value === null && state.arcCenterPos.value === null) {
+        // First click: defer center point.
         const centerHit = findPointAt(store.entities, world.x, world.y);
-        let centerId = centerHit;
-        if (!centerId) {
-          const newId = await addPoint(world.x, world.y);
-          if (newId === null) return;
-          centerId = newId;
-          // Refresh so store.entities contains the new center point.
-          await refreshSketch();
+        if (centerHit) {
+          state.arcCenterId.value = centerHit;
+        } else {
+          state.arcCenterPos.value = { x: world.x, y: world.y };
         }
-        state.arcCenterId.value = centerId;
       } else if (!state.arcRadiusSet.value) {
         state.arcRadiusPoint.value = { x: world.x, y: world.y };
         state.arcRadiusSet.value = true;
       } else {
-        const center = getPointCoords(state.arcCenterId.value);
-        if (!center) {
+        // Third click: commit center point (if deferred), then create arc.
+        try {
+          if (state.arcCenterId.value === null && state.arcCenterPos.value) {
+            const id = await addTrackedPoint(state.arcCenterPos.value.x, state.arcCenterPos.value.y);
+            if (id === null) { resetDrawingState(state); return; }
+            state.arcCenterId.value = id;
+          }
+          const center = getArcCenterCoords();
+          if (!center || state.arcCenterId.value === null) {
+            state.arcCenterId.value = null;
+            state.arcCenterPos.value = null;
+            state.arcRadiusSet.value = false;
+            state.arcRadiusPoint.value = null;
+            return;
+          }
+          const dx1 = state.arcRadiusPoint.value!.x - center.x;
+          const dy1 = state.arcRadiusPoint.value!.y - center.y;
+          const r = Math.sqrt(dx1 * dx1 + dy1 * dy1);
+          const startAngle = Math.atan2(dy1, dx1);
+          const endAngle = Math.atan2(world.y - center.y, world.x - center.x);
+          if (r > 0.01 && Math.abs(endAngle - startAngle) > 0.01) {
+            await addArc(state.arcCenterId.value, r, startAngle, endAngle);
+          }
+          // Center point is now referenced by the arc — clear tracking.
+          pendingPointIds.value = [];
           state.arcCenterId.value = null;
-          state.arcRadiusSet.value = false;
+          state.arcCenterPos.value = null;
           state.arcRadiusPoint.value = null;
-          return;
+          state.arcRadiusSet.value = false;
+          clearSketchPreviews();
+          await refreshSketch();
+        } catch (err) {
+          toast.error("绘制弧线失败: " + String(err));
+          await cleanupPendingPoints();
+          resetDrawingState(state);
+          clearSketchPreviews();
         }
-        const dx1 = state.arcRadiusPoint.value!.x - center.x;
-        const dy1 = state.arcRadiusPoint.value!.y - center.y;
-        const r = Math.sqrt(dx1 * dx1 + dy1 * dy1);
-        const startAngle = Math.atan2(dy1, dx1);
-        const endAngle = Math.atan2(world.y - center.y, world.x - center.x);
-        if (r > 0.01 && Math.abs(endAngle - startAngle) > 0.01) {
-          await addArc(state.arcCenterId.value, r, startAngle, endAngle);
-        }
-        state.arcCenterId.value = null;
-        state.arcRadiusPoint.value = null;
-        state.arcRadiusSet.value = false;
-        clearSketchPreviews();
-        await refreshSketch();
       }
       break;
     }
     case "spline": {
-      const hit = findPointAt(store.entities, world.x, world.y);
-      if (hit) {
-        state.splinePoints.value.push(hit);
-      } else {
-        const pid = await addPoint(world.x, world.y);
-        if (pid !== null) state.splinePoints.value.push(pid);
-        await refreshSketch();
+      try {
+        const hit = findPointAt(store.entities, world.x, world.y);
+        if (hit) {
+          state.splinePoints.value.push(hit);
+        } else {
+          const pid = await addTrackedPoint(world.x, world.y);
+          if (pid !== null) state.splinePoints.value.push(pid);
+          await refreshSketch();
+        }
+      } catch (err) {
+        toast.error("添加样条点失败: " + String(err));
       }
       break;
     }
     case "ellipse": {
-      if (state.ellipseCenterId.value === null) {
+      if (state.ellipseCenterId.value === null && state.ellipseCenterPos.value === null) {
+        // First click: defer center point.
         const hit = findPointAt(store.entities, world.x, world.y);
-        if (hit) state.ellipseCenterId.value = hit;
-        else {
-          const pid = await addPoint(world.x, world.y);
-          if (pid !== null) {
-            state.ellipseCenterId.value = pid;
-            await refreshSketch();
-          }
+        if (hit) {
+          state.ellipseCenterId.value = hit;
+        } else {
+          state.ellipseCenterPos.value = { x: world.x, y: world.y };
         }
       } else {
-        const hit = findPointAt(store.entities, world.x, world.y);
-        let endId = hit;
-        if (!endId) {
-          const pid = await addPoint(world.x, world.y);
-          if (pid === null) return;
-          endId = pid;
+        // Second click: commit center point (if deferred), create end point, then ellipse.
+        try {
+          if (state.ellipseCenterId.value === null && state.ellipseCenterPos.value) {
+            const pid = await addTrackedPoint(state.ellipseCenterPos.value.x, state.ellipseCenterPos.value.y);
+            if (pid !== null) state.ellipseCenterId.value = pid;
+          }
+          const hit = findPointAt(store.entities, world.x, world.y);
+          let endId = hit;
+          if (!endId) {
+            const pid = await addTrackedPoint(world.x, world.y);
+            if (pid === null) return;
+            endId = pid;
+          }
+          if (state.ellipseCenterId.value !== null) {
+            await addEllipse(state.ellipseCenterId.value, endId, 0.5);
+          }
+          // Points are now referenced by the ellipse — clear tracking.
+          pendingPointIds.value = [];
+          state.ellipseCenterId.value = null;
+          state.ellipseCenterPos.value = null;
+          await refreshSketch();
+        } catch (err) {
+          toast.error("绘制椭圆失败: " + String(err));
+          await cleanupPendingPoints();
+          resetDrawingState(state);
+          clearSketchPreviews();
         }
-        await addEllipse(state.ellipseCenterId.value, endId, 0.5);
-        state.ellipseCenterId.value = null;
-        await refreshSketch();
       }
       break;
     }
@@ -741,16 +823,36 @@ async function handleDrawingMouseDown(sketch: { x: number; y: number }) {
       } else {
         const x1 = state.rectStart.value.x, y1 = state.rectStart.value.y;
         const x2 = world.x, y2 = world.y;
-        const p1 = await addPoint(x1, y1), p2 = await addPoint(x2, y1);
-        const p3 = await addPoint(x2, y2), p4 = await addPoint(x1, y2);
-        if (p1 && p2 && p3 && p4) {
-          await addLine(p1, p2);
-          await addLine(p2, p3);
-          await addLine(p3, p4);
-          await addLine(p4, p1);
+        try {
+          const p1 = await addTrackedPoint(x1, y1), p2 = await addTrackedPoint(x2, y1);
+          const p3 = await addTrackedPoint(x2, y2), p4 = await addTrackedPoint(x1, y2);
+          if (p1 && p2 && p3 && p4) {
+            const l1 = await addLine(p1, p2);
+            const l2 = await addLine(p2, p3);
+            const l3 = await addLine(p3, p4);
+            const l4 = await addLine(p4, p1);
+            // Points are now referenced — clear tracking before auto-constraining.
+            pendingPointIds.value = [];
+            if (l1 && l2 && l3 && l4) {
+              await addConstraint({ Horizontal: { line: l1 } });
+              await addConstraint({ Horizontal: { line: l3 } });
+              await addConstraint({ Vertical: { line: l2 } });
+              await addConstraint({ Vertical: { line: l4 } });
+              await addConstraint({ Parallel: { line_a: l1, line_b: l3 } });
+              await addConstraint({ Parallel: { line_a: l2, line_b: l4 } });
+              await addConstraint({ Equal: { a: l1, b: l3 } });
+              await addConstraint({ Equal: { a: l2, b: l4 } });
+              await solveSketch();
+            }
+          }
+          state.rectStart.value = null;
+          await refreshSketch();
+        } catch (err) {
+          toast.error("绘制矩形失败: " + String(err));
+          await cleanupPendingPoints();
+          resetDrawingState(state);
+          clearSketchPreviews();
         }
-        state.rectStart.value = null;
-        await refreshSketch();
       }
       break;
     }
@@ -766,10 +868,14 @@ async function onMouseMove(e: MouseEvent) {
   if (isSketchMode.value && store.activeTool === "select" && state.isDragging.value && state.dragId.value) {
     const sketch = getSketchPoint(e);
     if (sketch) {
-      const target = activeSnap.value?.world ?? sketch;
-      await movePoint(state.dragId.value, target.x, target.y);
-      await solveSketch();
-      await refreshSketch();
+      try {
+        const target = activeSnap.value?.world ?? sketch;
+        await movePoint(state.dragId.value, target.x, target.y);
+        await solveSketch();
+        await refreshSketch();
+      } catch (err) {
+        toast.error("拖动失败: " + String(err));
+      }
     }
     return;
   }
@@ -783,32 +889,36 @@ async function onMouseMove(e: MouseEvent) {
   activeSnap.value = computeSnap(sketch, sx, sy);
 
   if (state.isDragging.value && state.dragId.value) {
-    const target = activeSnap.value?.world ?? sketch;
-    await movePoint(state.dragId.value, target.x, target.y);
-    await solveSketch();
-    await refreshSketch();
+    try {
+      const target = activeSnap.value?.world ?? sketch;
+      await movePoint(state.dragId.value, target.x, target.y);
+      await solveSketch();
+      await refreshSketch();
+    } catch (err) {
+      toast.error("拖动失败: " + String(err));
+    }
     return;
   }
 
   clearSketchPreviews();
   const previewWorld = activeSnap.value?.world ?? sketch;
   const planeName = getActivePlaneName();
-  if (store.activeTool === "line" && state.lineStartId.value !== null) {
-    const start = getPointCoords(state.lineStartId.value);
+  if (store.activeTool === "line" && (state.lineStartId.value !== null || state.lineStartPos.value !== null)) {
+    const start = getLineStartCoords();
     if (start) {
       const snapped = snapAngle(start, previewWorld, true);
       drawLinePreview(start, snapped);
     }
   }
-  if (store.activeTool === "circle" && state.circleCenterId.value !== null) {
-    const center = getPointCoords(state.circleCenterId.value);
+  if (store.activeTool === "circle" && (state.circleCenterId.value !== null || state.circleCenterPos.value !== null)) {
+    const center = getCircleCenterCoords();
     if (center) {
       const r = Math.hypot(previewWorld.x - center.x, previewWorld.y - center.y);
       drawCirclePreview(center, r);
     }
   }
-  if (store.activeTool === "arc" && state.arcCenterId.value !== null) {
-    const center = getPointCoords(state.arcCenterId.value);
+  if (store.activeTool === "arc" && (state.arcCenterId.value !== null || state.arcCenterPos.value !== null)) {
+    const center = getArcCenterCoords();
     if (center) {
       if (state.arcRadiusSet.value && state.arcRadiusPoint.value) {
         // Third step: show arc sweep from start angle to current cursor angle.
@@ -842,8 +952,14 @@ async function onMouseMove(e: MouseEvent) {
 }
 
 function onMouseUp() {
+  const wasDragging = state.isDragging.value;
   state.isDragging.value = false;
   state.dragId.value = null;
+  // M9 should listen for this event and call unifiedViewport.value?.refreshViewport()
+  // to keep the solid mesh in sync after the drag moves sketch points.
+  if (wasDragging) {
+    emit("drag-end");
+  }
 }
 
 function onMouseLeave() {
@@ -854,45 +970,64 @@ function onMouseLeave() {
 
 async function onRightClick() {
   if (state.splinePoints.value.length >= 2) {
-    await addSpline([...state.splinePoints.value]);
-    state.splinePoints.value = [];
-    await refreshSketch();
-    clearSketchPreviews();
+    try {
+      await addSpline([...state.splinePoints.value]);
+      // Spline points are now referenced — clear tracking.
+      pendingPointIds.value = [];
+      state.splinePoints.value = [];
+      await refreshSketch();
+      clearSketchPreviews();
+    } catch (err) {
+      toast.error("确认样条失败: " + String(err));
+    }
     return;
   }
-  if (state.lineStartId.value !== null) {
+  // Cancel current drawing gesture: delete any pending orphan entities,
+  // then reset the tool-specific state.
+  await cleanupPendingPoints();
+  if (state.lineStartId.value !== null || state.lineStartPos.value !== null) {
     state.lineStartId.value = null;
+    state.lineStartPos.value = null;
     clearSketchPreviews();
-  } else if (state.circleCenterId.value !== null) {
+  } else if (state.circleCenterId.value !== null || state.circleCenterPos.value !== null) {
     state.circleCenterId.value = null;
+    state.circleCenterPos.value = null;
     clearSketchPreviews();
   } else if (state.rectStart.value !== null) {
     state.rectStart.value = null;
     clearSketchPreviews();
-  } else if (state.arcCenterId.value !== null) {
+  } else if (state.arcCenterId.value !== null || state.arcCenterPos.value !== null) {
     state.arcCenterId.value = null;
+    state.arcCenterPos.value = null;
     state.arcRadiusPoint.value = null;
     state.arcRadiusSet.value = false;
+    clearSketchPreviews();
+  } else if (state.ellipseCenterId.value !== null || state.ellipseCenterPos.value !== null) {
+    state.ellipseCenterId.value = null;
+    state.ellipseCenterPos.value = null;
     clearSketchPreviews();
   }
 }
 
 async function onDoubleClick() {
   if (state.splinePoints.value.length >= 2) {
-    await addSpline([...state.splinePoints.value]);
-    state.splinePoints.value = [];
-    await refreshSketch();
-    clearSketchPreviews();
+    try {
+      await addSpline([...state.splinePoints.value]);
+      // Spline points are now referenced — clear tracking.
+      pendingPointIds.value = [];
+      state.splinePoints.value = [];
+      await refreshSketch();
+      clearSketchPreviews();
+    } catch (err) {
+      toast.error("确认样条失败: " + String(err));
+    }
     return;
   }
-  if (store.activeTool === "line" && state.lineStartId.value !== null) {
+  if (store.activeTool === "line" && (state.lineStartId.value !== null || state.lineStartPos.value !== null)) {
     state.lineStartId.value = null;
+    state.lineStartPos.value = null;
     clearSketchPreviews();
   }
-}
-
-function onWheel(_e: WheelEvent) {
-  // OrbitControls handle zoom.
 }
 
 // ── Helpers ────────────────────────────────────────────────────
@@ -903,15 +1038,59 @@ function getPointCoords(id: EntityId): { x: number; y: number } | null {
   return null;
 }
 
+/// Return the current line-start coordinates, whether the start came from
+/// an existing snap (`lineStartId`) or a deferred position (`lineStartPos`).
+function getLineStartCoords(): { x: number; y: number } | null {
+  if (state.lineStartId.value !== null) return getPointCoords(state.lineStartId.value);
+  return state.lineStartPos.value;
+}
+
+/// Return the current circle-center coordinates.
+function getCircleCenterCoords(): { x: number; y: number } | null {
+  if (state.circleCenterId.value !== null) return getPointCoords(state.circleCenterId.value);
+  return state.circleCenterPos.value;
+}
+
+/// Return the current arc-center coordinates.
+function getArcCenterCoords(): { x: number; y: number } | null {
+  if (state.arcCenterId.value !== null) return getPointCoords(state.arcCenterId.value);
+  return state.arcCenterPos.value;
+}
+
+/// Delete every pending entity, then clear the tracking array. Used when the
+/// user cancels mid-draw so that no orphan entities linger in the sketch.
+async function cleanupPendingPoints() {
+  const ids = [...pendingPointIds.value];
+  pendingPointIds.value = [];
+  for (const id of ids) {
+    try { await deleteEntity(id); } catch { /* best-effort */ }
+  }
+}
+
+/// Register a freshly created point id for cleanup on cancel. When the shape
+/// is confirmed, the caller clears pendingPointIds after the shape entity
+/// (line/circle/etc.) is created — the point is now referenced and must stay.
+function trackPendingPoint(id: number) {
+  pendingPointIds.value.push(id);
+}
+
+/// Call addPoint and track the returned id in pendingPointIds.
+async function addTrackedPoint(x: number, y: number): Promise<number | null> {
+  const id = await addPoint(x, y);
+  if (id !== null) trackPendingPoint(id);
+  return id;
+}
+
 // ── Public API ─────────────────────────────────────────────────
 
-const containerWidth = ref(0);
-const containerHeight = ref(0);
-
 async function refreshSketch() {
-  store.setEntities(await getSketchEntities());
-  store.setConstraints(await getSketchConstraints());
-  refreshSketchEntities();
+  try {
+    store.setEntities(await getSketchEntities());
+    store.setConstraints(await getSketchConstraints());
+    refreshSketchEntities();
+  } catch (err) {
+    toast.error("刷新草图失败: " + String(err));
+  }
 }
 
 async function onDimensionRefresh() {
@@ -994,6 +1173,8 @@ watch(isDrawing, (drawing) => {
 });
 
 watch(() => store.activeTool, () => {
+  // Delete any pending orphan entities before resetting tool state.
+  cleanupPendingPoints();
   resetDrawingState(state);
   clearSketchPreviews();
 });
@@ -1007,19 +1188,6 @@ onMounted(() => {
   refreshViewport();
   refreshSketchEntities();
   animate();
-
-  // Track container size so the dimension overlay can render at the right resolution.
-  if (containerRef.value) {
-    const updateSize = () => {
-      if (!containerRef.value) return;
-      containerWidth.value = containerRef.value.clientWidth;
-      containerHeight.value = containerRef.value.clientHeight;
-    };
-    updateSize();
-    const ro = new ResizeObserver(updateSize);
-    ro.observe(containerRef.value);
-    onUnmounted(() => ro.disconnect());
-  }
 });
 
 onUnmounted(() => {

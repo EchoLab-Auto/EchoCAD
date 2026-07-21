@@ -6,10 +6,11 @@ use echi_core::{
     sketch::{Constraint, EntityId, SketchEntity, SketchPoint},
 };
 use echi_plugin::PluginRegistry;
-use echi_render::{RegenResult, RenderMesh, regenerate};
+use echi_render::{RegenResult, RenderMesh, SolidGenerator, regenerate_with};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const MAX_UNDO: usize = 50;
 
@@ -65,6 +66,8 @@ pub struct AppState {
     pub regen_result: Mutex<RegenResult>,
     pub plugin_registry: PluginRegistry,
     pub(crate) undo_manager: Mutex<UndoManager>,
+    pub autosave_enabled: AtomicBool,
+    pub has_recovery_file: AtomicBool,
 }
 
 impl AppState {
@@ -89,24 +92,79 @@ impl AppState {
             regen_result: Mutex::new(RegenResult::default()),
             plugin_registry: registry,
             undo_manager: Mutex::new(UndoManager::new()),
+            autosave_enabled: AtomicBool::new(true),
+            has_recovery_file: AtomicBool::new(false),
         }
     }
 
     fn snapshot(&self) {
-        let doc = self.document.lock().unwrap();
-        let active = *self.active_sketch.lock().unwrap();
-        self.undo_manager.lock().unwrap().push_snapshot(&doc, active);
+        let doc = self.lock_doc();
+        let active = *self.lock_sketch();
+        self.lock_undo().push_snapshot(&doc, active);
+    }
+
+    /// Like [`snapshot`] but returns a token (the undo stack length *before*
+    /// the push) so the caller can safely discard ONLY this snapshot via
+    /// [`discard_snapshot`]. Used in paths that may need to roll back the
+    /// snapshot (e.g. `delete_feature` when cascade is false and dependents
+    /// exist), preventing U1-style corruption where a concurrent snapshot
+    /// push between our `snapshot()` and `pop()` would cause us to pop the
+    /// *wrong* snapshot.
+    fn snapshot_with_token(&self) -> usize {
+        let doc = self.lock_doc();
+        let active = *self.lock_sketch();
+        let mut mgr = self.lock_undo();
+        let len = mgr.undo_stack.len();
+        mgr.push_snapshot(&doc, active);
+        len
+    }
+
+    /// Discard the last undo snapshot, but ONLY if the stack length is
+    /// exactly `expected_before_len + 1` — i.e. exactly one snapshot was
+    /// pushed since the [`snapshot_with_token`] call. If the length differs,
+    /// another snapshot was pushed concurrently and we must NOT pop (that
+    /// would corrupt the undo stack).
+    fn discard_snapshot(&self, expected_before_len: usize) -> bool {
+        let mut mgr = self.lock_undo();
+        if mgr.undo_stack.len() == expected_before_len + 1 {
+            mgr.undo_stack.pop();
+            true
+        } else {
+            false
+        }
     }
 
     fn with_active_sketch_mut<T>(&self, f: impl FnOnce(&mut Sketch) -> T) -> Option<T> {
-        let mut doc = self.document.lock().unwrap();
-        let active = *self.active_sketch.lock().unwrap();
+        let mut doc = self.lock_doc();
+        let active = *self.lock_sketch();
         let id = active?;
         let feature = doc.get_feature_mut(id)?;
         match &mut feature.kind {
             FeatureKind::Sketch { sketch, .. } | FeatureKind::CustomSketch { sketch, .. } => Some(f(sketch)),
             _ => None,
         }
+    }
+
+    // ── Lock helpers with expect (design principle F5) ────────────
+    //
+    // Every Mutex lock uses .expect() with a descriptive message.
+    // If a prior command panicked while holding a lock, the mutex is
+    // poisoned. Without expect(), the subsequent unwrap() panics with
+    // a generic "poisoned" message that is undebuggable.  These helpers
+    // turn that into a clear signal so the user/developer can see
+    // WHICH lock was poisoned.
+
+    pub(crate) fn lock_doc(&self) -> std::sync::MutexGuard<'_, Document> {
+        self.document.lock().expect("document mutex poisoned — a prior command panicked while holding the document lock")
+    }
+    fn lock_sketch(&self) -> std::sync::MutexGuard<'_, Option<FeatureId>> {
+        self.active_sketch.lock().expect("active_sketch mutex poisoned — a prior command panicked while holding the active_sketch lock")
+    }
+    fn lock_undo(&self) -> std::sync::MutexGuard<'_, UndoManager> {
+        self.undo_manager.lock().expect("undo_manager mutex poisoned — a prior command panicked while holding the undo_manager lock")
+    }
+    fn lock_regen(&self) -> std::sync::MutexGuard<'_, RegenResult> {
+        self.regen_result.lock().expect("regen_result mutex poisoned — a prior command panicked while holding the regen_result lock")
     }
 }
 
@@ -156,17 +214,39 @@ pub struct ParameterInfo {
 
 // ── Regeneration helpers ─────────────────────────────────────────
 
+/// Bridge between the plugin registry and the regen pipeline's
+/// [`SolidGenerator`] trait. `SolidGenerator` lives in `echi-render` and
+/// `PluginRegistry` lives in `echi-plugin` — neither is local to this crate,
+/// so implementing one for the other directly violates the orphan rule.
+/// A local newtype wrapper keeps the impl on the right side of that rule
+/// while still keeping `echi-render` free of a direct `echi-plugin` dep.
+struct PluginSolidGen<'a>(&'a PluginRegistry);
+
+impl SolidGenerator for PluginSolidGen<'_> {
+    fn generate_solid(
+        &self,
+        plugin_id: &str,
+        generator_id: &str,
+        params: &HashMap<String, f64>,
+    ) -> Result<echi_geom::Mesh, String> {
+        PluginRegistry::generate_solid(self.0, plugin_id, generator_id, params)
+            .map_err(|e| e.to_string())
+    }
+}
+
 fn regenerate_state(state: &AppState) {
-    let doc = state.document.lock().unwrap();
-    let result = regenerate(&doc);
-    *state.regen_result.lock().unwrap() = result;
+    let doc = state.lock_doc();
+    let solid_gen: &dyn SolidGenerator = &PluginSolidGen(&state.plugin_registry);
+    let result = regenerate_with(&doc, Some(solid_gen));
+    *state.lock_regen() = result;
 }
 
 /// Regenerate from an already-locked document reference. Use this
 /// whenever the caller already holds the document Mutex to avoid deadlock.
 fn regen_locked(doc: &Document, state: &AppState) {
-    let result = regenerate(doc);
-    *state.regen_result.lock().unwrap() = result;
+    let solid_gen: &dyn SolidGenerator = &PluginSolidGen(&state.plugin_registry);
+    let result = regenerate_with(doc, Some(solid_gen));
+    *state.lock_regen() = result;
 }
 
 // ── Feature node projection ─────────────────────────────────────
@@ -263,7 +343,7 @@ fn add_feature_with_param(
     kind_fn: impl FnOnce(FeatureId, ParameterId) -> FeatureKind,
 ) -> Result<FeatureId, String> {
     state.snapshot();
-    let mut doc = state.document.lock().unwrap();
+    let mut doc = state.lock_doc();
     let next = doc.next_id();
     let param_id = doc.add_parameter(format!("{}{}", param_name, next), param_value);
     let id = doc.new_feature_id();
@@ -305,7 +385,7 @@ fn default_feature_name(kind: &FeatureKind, id: FeatureId) -> String {
 /// Locks the doc, snapshots, creates the feature (no parameter), regenerates.
 fn add_feature_kind(state: &AppState, kind: FeatureKind) -> Result<FeatureId, String> {
     state.snapshot();
-    let mut doc = state.document.lock().unwrap();
+    let mut doc = state.lock_doc();
     let id = doc.new_feature_id();
 
     // Validate dependencies before committing
@@ -326,8 +406,8 @@ fn add_feature_kind(state: &AppState, kind: FeatureKind) -> Result<FeatureId, St
 
 #[tauri::command]
 pub fn get_features(state: tauri::State<AppState>) -> Vec<FeatureNode> {
-    let doc = state.document.lock().unwrap();
-    let errors = &state.regen_result.lock().unwrap().errors;
+    let doc = state.lock_doc();
+    let errors = &state.lock_regen().errors;
     doc.features.iter().map(|f| feature_to_node(f, &doc, errors)).collect()
 }
 
@@ -336,7 +416,7 @@ pub fn get_features(state: tauri::State<AppState>) -> Vec<FeatureNode> {
 #[tauri::command]
 pub fn add_sketch_feature(plane: String, state: tauri::State<AppState>) -> FeatureId {
     state.snapshot();
-    let mut doc = state.document.lock().unwrap();
+    let mut doc = state.lock_doc();
     let id = doc.new_feature_id();
     let p = match plane.as_str() {
         "yz" => PlaneDefinition::YZ,
@@ -348,7 +428,7 @@ pub fn add_sketch_feature(plane: String, state: tauri::State<AppState>) -> Featu
         format!("Sketch{}", id.0),
         FeatureKind::Sketch { plane: p, sketch: Sketch::new() },
     ));
-    *state.active_sketch.lock().unwrap() = Some(id);
+    *state.lock_sketch() = Some(id);
     regen_locked(&doc, &state);
     id
 }
@@ -357,10 +437,10 @@ pub fn add_sketch_feature(plane: String, state: tauri::State<AppState>) -> Featu
 pub fn set_active_sketch(id: FeatureId, state: tauri::State<AppState>) {
     // Note: no snapshot. Switching the active sketch is a UI state change,
     // not a document mutation — it should not pollute the undo history.
-    let doc = state.document.lock().unwrap();
+    let doc = state.lock_doc();
     if let Some(f) = doc.get_feature(id) {
         if f.is_sketch() {
-            *state.active_sketch.lock().unwrap() = Some(id);
+            *state.lock_sketch() = Some(id);
         }
     }
 }
@@ -406,16 +486,74 @@ pub fn add_revolve_feature(
 
 #[tauri::command]
 pub fn add_fillet_feature(target_id: FeatureId, radius: f64, state: tauri::State<AppState>) -> Result<FeatureId, String> {
+    // No edge list → legacy "fillet every sharp edge" behaviour.
     add_feature_with_param(&state, "Fillet", radius, move |_id, param_id| {
-        FeatureKind::Fillet { target_id, radius: param_id }
+        FeatureKind::Fillet { target_id, radius: param_id, edges: Vec::new() }
+    })
+}
+
+/// Fillet a specific selection of edges. Each edge is a `(vertex_a, vertex_b)`
+/// index pair into the target solid's mesh — the UI produces these from the
+/// user's edge picks. An empty list falls back to "all sharp edges".
+#[tauri::command]
+pub fn add_fillet_edges_feature(
+    target_id: FeatureId,
+    radius: f64,
+    edges: Vec<(u32, u32)>,
+    state: tauri::State<AppState>,
+) -> Result<FeatureId, String> {
+    add_feature_with_param(&state, "Fillet", radius, move |_id, param_id| {
+        FeatureKind::Fillet { target_id, radius: param_id, edges }
     })
 }
 
 #[tauri::command]
 pub fn add_chamfer_feature(target_id: FeatureId, distance: f64, state: tauri::State<AppState>) -> Result<FeatureId, String> {
     add_feature_with_param(&state, "Chamfer", distance, move |_id, param_id| {
-        FeatureKind::Chamfer { target_id, distance: param_id }
+        FeatureKind::Chamfer { target_id, distance: param_id, edges: Vec::new() }
     })
+}
+
+/// Chamfer a specific selection of edges. See [`add_fillet_edges_feature`].
+#[tauri::command]
+pub fn add_chamfer_edges_feature(
+    target_id: FeatureId,
+    distance: f64,
+    edges: Vec<(u32, u32)>,
+    state: tauri::State<AppState>,
+) -> Result<FeatureId, String> {
+    add_feature_with_param(&state, "Chamfer", distance, move |_id, param_id| {
+        FeatureKind::Chamfer { target_id, distance: param_id, edges }
+    })
+}
+
+/// Create a new sketch on a plane offset from one of the three base planes.
+/// `base_plane_tag` is `"xy"` | `"yz"` | `"zx"`; `distance` is signed offset
+/// along the base plane's normal. The sketch becomes the active sketch.
+#[tauri::command]
+pub fn create_offset_plane(
+    base_plane_tag: String,
+    distance: f64,
+    state: tauri::State<AppState>,
+) -> Result<FeatureId, String> {
+    let base = match base_plane_tag.as_str() {
+        "yz" => PlaneDefinition::YZ,
+        "zx" => PlaneDefinition::ZX,
+        "xy" => PlaneDefinition::XY,
+        other => return Err(format!("unknown base plane '{}' (expected xy|yz|zx)", other)),
+    };
+    state.snapshot();
+    let mut doc = state.lock_doc();
+    let id = doc.new_feature_id();
+    let plane = PlaneDefinition::Offset { base: Box::new(base), distance };
+    doc.add_feature(Feature::new(
+        id,
+        format!("Sketch{}", id.0),
+        FeatureKind::Sketch { plane, sketch: Sketch::new() },
+    ));
+    *state.lock_sketch() = Some(id);
+    regen_locked(&doc, &state);
+    Ok(id)
 }
 
 #[tauri::command]
@@ -488,7 +626,7 @@ pub fn add_boolean_feature(
 #[tauri::command]
 pub fn update_parameter(id: ParameterId, value: f64, state: tauri::State<AppState>) {
     state.snapshot();
-    let mut doc = state.document.lock().unwrap();
+    let mut doc = state.lock_doc();
     if let Some(p) = doc.get_parameter_mut(id) {
         p.value = value;
     }
@@ -498,7 +636,7 @@ pub fn update_parameter(id: ParameterId, value: f64, state: tauri::State<AppStat
 #[tauri::command]
 pub fn rename_feature(id: FeatureId, name: String, state: tauri::State<AppState>) {
     state.snapshot();
-    let mut doc = state.document.lock().unwrap();
+    let mut doc = state.lock_doc();
     if let Some(f) = doc.get_feature_mut(id) {
         f.set_name(name);
     }
@@ -508,7 +646,7 @@ pub fn rename_feature(id: FeatureId, name: String, state: tauri::State<AppState>
 #[tauri::command]
 pub fn set_feature_suppressed(id: FeatureId, suppressed: bool, state: tauri::State<AppState>) {
     state.snapshot();
-    let mut doc = state.document.lock().unwrap();
+    let mut doc = state.lock_doc();
     if let Some(f) = doc.get_feature_mut(id) {
         f.suppressed = suppressed;
     }
@@ -524,13 +662,18 @@ pub fn delete_feature(
     cascade: bool,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
-    state.snapshot();
-    let mut doc = state.document.lock().unwrap();
+    // U1: use snapshot_with_token so we can safely discard only THIS
+    // snapshot if the operation is cancelled. A bare snapshot()+pop()
+    // could pop a snapshot that was pushed by a concurrent command
+    // between our snapshot() and the pop, corrupting the undo stack.
+    let snap_token = state.snapshot_with_token();
+    let mut doc = state.lock_doc();
     let dependents = doc.dependents_of(id);
     if !dependents.is_empty() && !cascade {
-        // Roll back the snapshot we just took — we don't want to record
-        // an undo point for a no-op.
-        state.undo_manager.lock().unwrap().undo_stack.pop();
+        // Discard the snapshot we just took — we don't want to record
+        // an undo point for a no-op. The token ensures we only pop our
+        // own snapshot.
+        state.discard_snapshot(snap_token);
         let names: Vec<String> = dependents.iter()
             .filter_map(|d| doc.get_feature(*d).map(|f| f.name().to_string()))
             .collect();
@@ -559,7 +702,7 @@ pub fn delete_feature(
         doc.remove_feature(id);
     }
 
-    let mut active = state.active_sketch.lock().unwrap();
+    let mut active = state.lock_sketch();
     if *active == Some(id) || (cascade && active.map(|a| doc.get_feature(a).is_none()).unwrap_or(false)) {
         *active = doc.features.iter().find_map(|f| if f.is_sketch() { Some(f.id()) } else { None });
     }
@@ -568,9 +711,9 @@ pub fn delete_feature(
 }
 
 #[tauri::command]
-pub fn clear_document(state: tauri::State<'_, AppState>) {
+pub fn clear_document(app: tauri::AppHandle, state: tauri::State<'_, AppState>) {
     state.snapshot();
-    let mut doc = state.document.lock().unwrap();
+    let mut doc = state.lock_doc();
     *doc = Document::new("Part1");
     let id = doc.new_feature_id();
     doc.add_feature(Feature::new(
@@ -578,16 +721,17 @@ pub fn clear_document(state: tauri::State<'_, AppState>) {
         "Sketch1",
         FeatureKind::Sketch { sketch: Sketch::new(), plane: PlaneDefinition::default() },
     ));
-    *state.active_sketch.lock().unwrap() = Some(id);
+    *state.lock_sketch() = Some(id);
     regen_locked(&doc, &state);
+    clear_autosave_file(&app);
 }
 
 // ── Sketch entity operations ─────────────────────────────────────
 
 #[tauri::command]
 pub fn get_sketch_entities(state: tauri::State<AppState>) -> Vec<RenderEntity> {
-    let doc = state.document.lock().unwrap();
-    let id = match *state.active_sketch.lock().unwrap() {
+    let doc = state.lock_doc();
+    let id = match *state.lock_sketch() {
         Some(id) => id,
         None => return vec![],
     };
@@ -627,8 +771,8 @@ pub fn get_sketch_entities(state: tauri::State<AppState>) -> Vec<RenderEntity> {
 
 #[tauri::command]
 pub fn get_sketch_constraints(state: tauri::State<AppState>) -> Vec<Constraint> {
-    let doc = state.document.lock().unwrap();
-    let id = match *state.active_sketch.lock().unwrap() {
+    let doc = state.lock_doc();
+    let id = match *state.lock_sketch() {
         Some(id) => id,
         None => return vec![],
     };
@@ -794,7 +938,7 @@ pub fn clear_sketch(state: tauri::State<AppState>) {
 
 #[tauri::command]
 pub fn get_solid_mesh(state: tauri::State<AppState>) -> Option<RenderMesh> {
-    let result = state.regen_result.lock().unwrap();
+    let result = state.lock_regen();
     result.current_solid.and_then(|id| result.solids.get(&id)).map(RenderMesh::from)
 }
 
@@ -808,7 +952,7 @@ pub fn preview_extrude(
     depth: f64,
     state: tauri::State<AppState>,
 ) -> Option<RenderMesh> {
-    let doc = state.document.lock().unwrap();
+    let doc = state.lock_doc();
     let feature = doc.get_feature(sketch_id)?;
     let sketch = feature.sketch()?;
     let plane = feature.plane().cloned().unwrap_or_default();
@@ -834,8 +978,8 @@ pub struct SolidMeshEntry {
 
 #[tauri::command]
 pub fn get_all_solid_meshes(state: tauri::State<AppState>) -> Vec<SolidMeshEntry> {
-    let doc = state.document.lock().unwrap();
-    let result = state.regen_result.lock().unwrap();
+    let doc = state.lock_doc();
+    let result = state.lock_regen();
     result.solids.iter().map(|(id, mesh)| {
         let feature = doc.get_feature(*id);
         let name = feature.map(|f| f.name().to_string()).unwrap_or_else(|| format!("Solid{}", id.0));
@@ -847,7 +991,7 @@ pub fn get_all_solid_meshes(state: tauri::State<AppState>) -> Vec<SolidMeshEntry
 
 #[tauri::command]
 pub fn get_regen_errors(state: tauri::State<AppState>) -> Vec<(FeatureId, String)> {
-    let result = state.regen_result.lock().unwrap();
+    let result = state.lock_regen();
     let mut errors: Vec<(FeatureId, String)> = result.errors.iter().map(|(k, v)| (*k, v.clone())).collect();
     errors.sort_by_key(|(id, _)| id.0);
     errors
@@ -868,9 +1012,10 @@ pub fn save_project_cmd(app: tauri::AppHandle, state: tauri::State<'_, AppState>
     let path = app.dialog().file().add_filter("EchoCAD Project", &["echi"]).blocking_save_file();
     if let Some(path) = path {
         let path = file_path_to_path(path).ok_or("Invalid file path")?;
-        let doc = state.document.lock().unwrap();
+        let doc = state.lock_doc();
         echi_io::save_project(&*doc, &path).map_err(|e| e.to_string())?;
         record_recent_file(&app, &path);
+        clear_autosave_file(&app);
         Ok(path.to_string_lossy().to_string())
     } else {
         Err("No file selected".into())
@@ -880,10 +1025,12 @@ pub fn save_project_cmd(app: tauri::AppHandle, state: tauri::State<'_, AppState>
 /// Save the document to a specific path (no dialog). Used for "Save" when
 /// the project is already on disk, or by tests.
 #[tauri::command]
-pub fn save_project_to(state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
+pub fn save_project_to(app: tauri::AppHandle, state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
     let p: std::path::PathBuf = path.into();
-    let doc = state.document.lock().unwrap();
-    echi_io::save_project(&*doc, &p).map_err(|e| e.to_string())
+    let doc = state.lock_doc();
+    echi_io::save_project(&*doc, &p).map_err(|e| e.to_string())?;
+    clear_autosave_file(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -893,15 +1040,21 @@ pub fn load_project_cmd(app: tauri::AppHandle, state: tauri::State<'_, AppState>
     if let Some(path) = path {
         let path = file_path_to_path(path).ok_or("Invalid file path")?;
         let doc = echi_io::load_project(&path).map_err(|e| e.to_string())?;
-        {
-            let mut state_doc = state.document.lock().unwrap();
+        // D1: compute the next active sketch while we hold the document lock,
+        // then drop it BEFORE locking active_sketch. This keeps the lock
+        // ordering consistent with snapshot() (doc → active_sketch) and
+        // prevents a deadlock with any concurrent caller that holds
+        // active_sketch first.
+        let active = {
+            let mut state_doc = state.lock_doc();
             *state_doc = doc;
-        }
-        let mut active = state.active_sketch.lock().unwrap();
-        *active = state.document.lock().unwrap().features.iter()
-            .find_map(|f| if f.is_sketch() { Some(f.id()) } else { None });
+            state_doc.features.iter()
+                .find_map(|f| if f.is_sketch() { Some(f.id()) } else { None })
+        }; // doc lock dropped here
+        *state.lock_sketch() = active;
         regenerate_state(&state);
         record_recent_file(&app, &path);
+        clear_autosave_file(&app);
         Ok(())
     } else {
         Err("No file selected".into())
@@ -909,17 +1062,19 @@ pub fn load_project_cmd(app: tauri::AppHandle, state: tauri::State<'_, AppState>
 }
 
 #[tauri::command]
-pub fn load_project_from(state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
+pub fn load_project_from(app: tauri::AppHandle, state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
     let p: std::path::PathBuf = path.into();
     let doc = echi_io::load_project(&p).map_err(|e| e.to_string())?;
-    {
-        let mut state_doc = state.document.lock().unwrap();
+    // D1: same lock-ordering fix as load_project_cmd.
+    let active = {
+        let mut state_doc = state.lock_doc();
         *state_doc = doc;
-    }
-    let mut active = state.active_sketch.lock().unwrap();
-    *active = state.document.lock().unwrap().features.iter()
-        .find_map(|f| if f.is_sketch() { Some(f.id()) } else { None });
+        state_doc.features.iter()
+            .find_map(|f| if f.is_sketch() { Some(f.id()) } else { None })
+    }; // doc lock dropped here
+    *state.lock_sketch() = active;
     regenerate_state(&state);
+    clear_autosave_file(&app);
     Ok(())
 }
 
@@ -972,7 +1127,7 @@ pub fn export_stl(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> R
     let path = app.dialog().file().add_filter("STL", &["stl"]).blocking_save_file();
     if let Some(path) = path {
         let path = file_path_to_path(path).ok_or("Invalid file path")?;
-        let result = state.regen_result.lock().unwrap();
+        let result = state.lock_regen();
         let mesh = result.current_solid
             .and_then(|id| result.solids.get(&id))
             .ok_or("No solid to export")?;
@@ -990,12 +1145,30 @@ pub fn export_obj(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> R
     let path = app.dialog().file().add_filter("OBJ", &["obj"]).blocking_save_file();
     if let Some(path) = path {
         let path = file_path_to_path(path).ok_or("Invalid file path")?;
-        let result = state.regen_result.lock().unwrap();
+        let result = state.lock_regen();
         let mesh = result.current_solid
             .and_then(|id| result.solids.get(&id))
             .ok_or("No solid to export")?;
         let mut file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
         echi_io::export_obj(mesh, &mut file).map_err(|e| e.to_string())?;
+        Ok(path.to_string_lossy().to_string())
+    } else {
+        Err("No file selected".into())
+    }
+}
+
+#[tauri::command]
+pub fn export_gltf_cmd(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let path = app.dialog().file().add_filter("glTF", &["gltf"]).blocking_save_file();
+    if let Some(path) = path {
+        let path = file_path_to_path(path).ok_or("Invalid file path")?;
+        let result = state.lock_regen();
+        let mesh = result.current_solid
+            .and_then(|id| result.solids.get(&id))
+            .ok_or("No solid to export")?;
+        let mut file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+        echi_io::export_gltf(mesh, &mut file).map_err(|e| e.to_string())?;
         Ok(path.to_string_lossy().to_string())
     } else {
         Err("No file selected".into())
@@ -1119,7 +1292,7 @@ pub fn generate_plugin_feature(
     let sketch = state.plugin_registry.generate_sketch(&plugin_id, &generator_id, &params)
         .map_err(|e| e.to_string())?;
     state.snapshot();
-    let mut doc = state.document.lock().unwrap();
+    let mut doc = state.lock_doc();
     let id = doc.new_feature_id();
     let gen_name = state.plugin_registry.find_generator(&plugin_id, &generator_id)
         .map(|g| g.name)
@@ -1133,7 +1306,7 @@ pub fn generate_plugin_feature(
             plane: PlaneDefinition::default(),
         },
     ));
-    *state.active_sketch.lock().unwrap() = Some(id);
+    *state.lock_sketch() = Some(id);
     regen_locked(&doc, &state);
     Ok(id)
 }
@@ -1142,9 +1315,9 @@ pub fn generate_plugin_feature(
 
 #[tauri::command]
 pub fn undo(state: tauri::State<AppState>) -> Result<bool, String> {
-    let mut doc = state.document.lock().unwrap();
-    let active = *state.active_sketch.lock().unwrap();
-    let mut mgr = state.undo_manager.lock().unwrap();
+    let mut doc = state.lock_doc();
+    let active = *state.lock_sketch();
+    let mut mgr = state.lock_undo();
     if !mgr.can_undo() {
         return Ok(false);
     }
@@ -1153,7 +1326,7 @@ pub fn undo(state: tauri::State<AppState>) -> Result<bool, String> {
         let valid = ra
             .filter(|&id| doc.get_feature(id).map(|f| f.is_sketch()).unwrap_or(false))
             .or_else(|| doc.features.iter().find_map(|f| if f.is_sketch() { Some(f.id()) } else { None }));
-        *state.active_sketch.lock().unwrap() = valid;
+        *state.lock_sketch() = valid;
         regen_locked(&doc, &state);
         Ok(true)
     } else {
@@ -1163,9 +1336,9 @@ pub fn undo(state: tauri::State<AppState>) -> Result<bool, String> {
 
 #[tauri::command]
 pub fn redo(state: tauri::State<AppState>) -> Result<bool, String> {
-    let mut doc = state.document.lock().unwrap();
-    let active = *state.active_sketch.lock().unwrap();
-    let mut mgr = state.undo_manager.lock().unwrap();
+    let mut doc = state.lock_doc();
+    let active = *state.lock_sketch();
+    let mut mgr = state.lock_undo();
     if !mgr.can_redo() {
         return Ok(false);
     }
@@ -1174,7 +1347,7 @@ pub fn redo(state: tauri::State<AppState>) -> Result<bool, String> {
         let valid = ra
             .filter(|&id| doc.get_feature(id).map(|f| f.is_sketch()).unwrap_or(false))
             .or_else(|| doc.features.iter().find_map(|f| if f.is_sketch() { Some(f.id()) } else { None }));
-        *state.active_sketch.lock().unwrap() = valid;
+        *state.lock_sketch() = valid;
         regen_locked(&doc, &state);
         Ok(true)
     } else {
@@ -1184,6 +1357,22 @@ pub fn redo(state: tauri::State<AppState>) -> Result<bool, String> {
 
 #[tauri::command]
 pub fn can_undo_redo(state: tauri::State<AppState>) -> (bool, bool) {
-    let mgr = state.undo_manager.lock().unwrap();
+    let mgr = state.lock_undo();
     (mgr.can_undo(), mgr.can_redo())
+}
+
+// ── Auto-save / recovery ─────────────────────────────────────────
+
+/// Remove the autosave file so stale snapshots don't survive a save/load/clear.
+fn clear_autosave_file(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    if let Ok(dir) = app.path().app_config_dir() {
+        let path = dir.join("autosave.echi");
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[tauri::command]
+pub fn check_recovery(state: tauri::State<AppState>) -> bool {
+    state.has_recovery_file.load(Ordering::Relaxed)
 }

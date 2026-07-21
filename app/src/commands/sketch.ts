@@ -100,6 +100,9 @@ export interface FeatureNode {
   errors: string | null;
   /** For sketches: the plane the sketch lives on. */
   plane: "xy" | "yz" | "zx" | "offset" | null;
+  /** Optional per-feature color as a hex string (e.g. "#ff8800").
+   *  `null` / absent means the renderer should use the default palette. */
+  color?: string | null;
 }
 
 export interface RenderMesh {
@@ -159,6 +162,17 @@ export async function addFilletFeature(
   return invoke("add_fillet_feature", { targetId, radius });
 }
 
+/// Fillet a specific selection of edges on the target solid. Each edge is a
+/// `(vertex_a, vertex_b)` index pair into the target solid's mesh. An empty
+/// list falls back to "all sharp edges" (same as `addFilletFeature`).
+export async function addFilletEdgesFeature(
+  targetId: FeatureId,
+  radius: number,
+  edges: [number, number][]
+): Promise<FeatureId> {
+  return invoke("add_fillet_edges_feature", { targetId, radius, edges });
+}
+
 export async function addLinearPattern(
   targetId: FeatureId, dirX: number, dirY: number, dirZ: number,
   count: number, spacing: number
@@ -210,6 +224,27 @@ export async function addChamferFeature(
   distance: number
 ): Promise<FeatureId> {
   return invoke("add_chamfer_feature", { targetId, distance });
+}
+
+/// Chamfer a specific selection of edges on the target solid. See
+/// [`addFilletEdgesFeature`] for the edge-pair convention; an empty list
+/// falls back to "all sharp edges".
+export async function addChamferEdgesFeature(
+  targetId: FeatureId,
+  distance: number,
+  edges: [number, number][]
+): Promise<FeatureId> {
+  return invoke("add_chamfer_edges_feature", { targetId, distance, edges });
+}
+
+/// Create a new sketch on a plane offset from one of the three base planes.
+/// `basePlaneTag` is `"xy"` | `"yz"` | `"zx"`; `distance` is a signed offset
+/// along the base plane's normal. The new sketch becomes the active sketch.
+export async function createOffsetPlane(
+  basePlaneTag: string,
+  distance: number
+): Promise<FeatureId> {
+  return invoke("create_offset_plane", { basePlaneTag, distance });
 }
 
 export async function addRevolveFeature(
@@ -387,6 +422,14 @@ export async function exportStl(): Promise<string> {
 
 export async function exportObj(): Promise<string> {
   return invoke("export_obj");
+}
+
+export async function exportGltf(): Promise<string> {
+  return invoke("export_gltf_cmd");
+}
+
+export async function checkRecovery(): Promise<boolean> {
+  return invoke("check_recovery");
 }
 
 export async function clearDocument(): Promise<void> {

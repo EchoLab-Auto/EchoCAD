@@ -317,3 +317,121 @@ fn tessellate_circle_revolve_profile(sketch: &Sketch) -> Option<Vec<(f64, f64)>>
 
     Some(points)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use echi_core::sketch::Sketch;
+
+    fn make_rect_profile_right_of_y_axis() -> Sketch {
+        // A rectangle offset from Y axis: (1,0) to (2,1)
+        let mut sketch = Sketch::new();
+        let p0 = sketch.add_point(1.0, 0.0);
+        let p1 = sketch.add_point(2.0, 0.0);
+        let p2 = sketch.add_point(2.0, 1.0);
+        let p3 = sketch.add_point(1.0, 1.0);
+        sketch.add_line(p0, p1);
+        sketch.add_line(p1, p2);
+        sketch.add_line(p2, p3);
+        sketch.add_line(p3, p0);
+        sketch
+    }
+
+    #[test]
+    fn revolve_square_360_around_y_axis() {
+        let sketch = make_rect_profile_right_of_y_axis();
+        let mesh = revolve(&sketch, 2.0 * std::f64::consts::PI, 32, None, None)
+            .expect("should revolve square 360 degrees");
+        assert!(mesh.vertex_count() > 0);
+        assert!(!mesh.indices.is_empty());
+        let vc = mesh.vertex_count() as u32;
+        for &idx in &mesh.indices {
+            assert!(idx < vc, "index {} out of bounds", idx);
+        }
+        // Full revolution should produce caps (more indices than just side walls)
+        assert!(mesh.indices.len() > 100);
+    }
+
+    #[test]
+    fn revolve_partial_angle_180() {
+        let sketch = make_rect_profile_right_of_y_axis();
+        let mesh = revolve(&sketch, std::f64::consts::PI, 16, None, None)
+            .expect("should revolve 180 degrees");
+        assert!(mesh.vertex_count() > 0);
+        assert!(!mesh.indices.is_empty());
+    }
+
+    #[test]
+    fn revolve_empty_sketch_returns_none() {
+        let sketch = Sketch::new();
+        assert!(revolve(&sketch, 2.0 * std::f64::consts::PI, 32, None, None).is_none());
+    }
+
+    #[test]
+    fn revolve_zero_angle_returns_mesh() {
+        let sketch = make_rect_profile_right_of_y_axis();
+        let result = revolve(&sketch, 0.0, 32, None, None);
+        // Zero angle produces a degenerate mesh (all slices at theta=0)
+        // rather than None — the function does not short-circuit on zero angle.
+        let mesh = result.expect("zero angle should still return a mesh");
+        assert!(mesh.vertex_count() > 0);
+    }
+
+    #[test]
+    fn revolve_degenerate_axis_returns_none() {
+        let sketch = make_rect_profile_right_of_y_axis();
+        // Axis start == axis end
+        let result = revolve(
+            &sketch,
+            2.0 * std::f64::consts::PI,
+            32,
+            Some((0.0, 0.0)),
+            Some((0.0, 0.0)),
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn revolve_around_x_axis() {
+        // Profile offset from X axis in Y: (0, 1) to (1, 2)
+        let mut sketch = Sketch::new();
+        let p0 = sketch.add_point(0.0, 1.0);
+        let p1 = sketch.add_point(1.0, 1.0);
+        let p2 = sketch.add_point(1.0, 2.0);
+        let p3 = sketch.add_point(0.0, 2.0);
+        sketch.add_line(p0, p1);
+        sketch.add_line(p1, p2);
+        sketch.add_line(p2, p3);
+        sketch.add_line(p3, p0);
+
+        let mesh = revolve(
+            &sketch,
+            2.0 * std::f64::consts::PI,
+            32,
+            Some((0.0, 0.0)),
+            Some((1.0, 0.0)),
+        )
+        .expect("should revolve around X axis");
+        assert!(mesh.vertex_count() > 0);
+        assert!(!mesh.indices.is_empty());
+    }
+
+    #[test]
+    fn revolve_no_nan_invariant() {
+        let sketch = make_rect_profile_right_of_y_axis();
+        let mesh = revolve(&sketch, 2.0 * std::f64::consts::PI, 32, None, None)
+            .expect("should produce mesh");
+        assert!(mesh.vertex_count() > 0);
+        assert!(!mesh.indices.is_empty());
+        for &v in &mesh.positions {
+            assert!(!v.is_nan(), "NaN in positions");
+        }
+        for &n in &mesh.normals {
+            assert!(!n.is_nan(), "NaN in normals");
+        }
+        let vc = mesh.vertex_count() as u32;
+        for &idx in &mesh.indices {
+            assert!(idx < vc, "index {} out of bounds", idx);
+        }
+    }
+}

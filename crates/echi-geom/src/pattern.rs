@@ -160,3 +160,196 @@ fn copy_mesh_into(src: &Mesh, dst: &mut Mesh) {
     dst.normals.extend_from_slice(&src.normals);
     dst.indices.extend_from_slice(&src.indices);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extrude::{Mesh, extrude};
+    use echi_core::feature::{ExtrudeDirection, PlaneDefinition};
+    use echi_core::sketch::Sketch;
+
+    /// Build a small 1x1x1 cube mesh by extruding a square sketch.
+    fn cube_mesh() -> Mesh {
+        let mut sketch = Sketch::new();
+        let p0 = sketch.add_point(0.0, 0.0);
+        let p1 = sketch.add_point(1.0, 0.0);
+        let p2 = sketch.add_point(1.0, 1.0);
+        let p3 = sketch.add_point(0.0, 1.0);
+        sketch.add_line(p0, p1);
+        sketch.add_line(p1, p2);
+        sketch.add_line(p2, p3);
+        sketch.add_line(p3, p0);
+        extrude(
+            &sketch,
+            1.0,
+            ExtrudeDirection::OneSide,
+            0.0,
+            &PlaneDefinition::XY,
+        )
+        .expect("cube extrude should succeed")
+    }
+
+    fn assert_no_nan(m: &Mesh) {
+        assert!(
+            !m.positions.iter().any(|v| v.is_nan()),
+            "NaN in positions"
+        );
+        assert!(!m.normals.iter().any(|v| v.is_nan()), "NaN in normals");
+    }
+
+    fn assert_indices_in_bounds(m: &Mesh) {
+        let n = m.vertex_count() as u32;
+        for &i in &m.indices {
+            assert!(i < n, "index {} out of bounds ({})", i, n);
+        }
+    }
+
+    #[test]
+    fn linear_pattern_basic() {
+        let cube = cube_mesh();
+        let input_verts = cube.vertex_count();
+        let result = linear_pattern(&cube, 1.0, 0.0, 0.0, 3, 2.0);
+        // 3 instances (original + 2 copies)
+        assert!(
+            result.vertex_count() >= 3 * input_verts,
+            "linear pattern should have at least 3x input vertices, got {} vs {}",
+            result.vertex_count(),
+            3 * input_verts
+        );
+        assert_no_nan(&result);
+        assert_indices_in_bounds(&result);
+    }
+
+    #[test]
+    fn circular_pattern_basic() {
+        let cube = cube_mesh();
+        let input_verts = cube.vertex_count();
+        let result = circular_pattern(&cube, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 4, 360.0);
+        // 4 instances
+        assert!(
+            result.vertex_count() >= 4 * input_verts,
+            "circular pattern should have at least 4x input vertices, got {} vs {}",
+            result.vertex_count(),
+            4 * input_verts
+        );
+        assert_no_nan(&result);
+        assert_indices_in_bounds(&result);
+
+        // First instance (original) should have its vertices at original positions.
+        // First vertex of the input cube should be at (0,0,0) as the first point added.
+        assert!(
+            (result.positions[0] - 0.0).abs() < 1e-4,
+            "first instance vertex x should be 0.0"
+        );
+        assert!(
+            (result.positions[1] - 0.0).abs() < 1e-4,
+            "first instance vertex y should be 0.0"
+        );
+    }
+
+    #[test]
+    fn mirror_across_plane_basic() {
+        let cube = cube_mesh();
+        let input_verts = cube.vertex_count();
+        // Mirror across YZ plane (normal = (1,0,0), through origin).
+        let result = mirror_across_plane(&cube, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        // Should have original + mirrored copy
+        assert!(
+            result.vertex_count() >= 2 * input_verts,
+            "mirror should have at least 2x input vertices, got {} vs {}",
+            result.vertex_count(),
+            2 * input_verts
+        );
+        assert_no_nan(&result);
+        assert_indices_in_bounds(&result);
+
+        // The mirrored half should have positive-x versions of original positive-x vertices,
+        // and negative-x versions of original negative-x vertices.
+        // Since the cube is [0,1]^3, all its x >= 0. The mirrored copy should have x <= 0.
+        let mut found_negative_x = false;
+        for vi in input_verts..result.vertex_count() {
+            let x = result.positions[vi * 3];
+            if x < -0.01 {
+                found_negative_x = true;
+                break;
+            }
+        }
+        assert!(found_negative_x, "mirrored half should have negative-x vertices");
+    }
+
+    #[test]
+    fn linear_pattern_count_zero_returns_identity() {
+        let cube = cube_mesh();
+        let result = linear_pattern(&cube, 1.0, 0.0, 0.0, 0, 2.0);
+        assert_eq!(result.vertex_count(), cube.vertex_count());
+        assert_no_nan(&result);
+    }
+
+    #[test]
+    fn linear_pattern_count_one_returns_identity() {
+        let cube = cube_mesh();
+        let result = linear_pattern(&cube, 1.0, 0.0, 0.0, 1, 2.0);
+        assert_eq!(result.vertex_count(), cube.vertex_count());
+        assert_no_nan(&result);
+    }
+
+    #[test]
+    fn linear_pattern_zero_spacing_all_overlap() {
+        let cube = cube_mesh();
+        let input_verts = cube.vertex_count();
+        let result = linear_pattern(&cube, 1.0, 0.0, 0.0, 3, 0.0);
+        // Still produces 3 instances worth of vertices, all at same location.
+        assert_eq!(result.vertex_count(), 3 * input_verts);
+        assert_no_nan(&result);
+        assert_indices_in_bounds(&result);
+    }
+
+    #[test]
+    fn circular_pattern_degenerate_axis_returns_identity() {
+        let cube = cube_mesh();
+        // Zero-length axis direction → falls back to clone.
+        let result = circular_pattern(&cube, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 4, 360.0);
+        assert_eq!(result.vertex_count(), cube.vertex_count());
+        assert_no_nan(&result);
+    }
+
+    #[test]
+    fn circular_pattern_count_one_returns_identity() {
+        let cube = cube_mesh();
+        let result = circular_pattern(&cube, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1, 360.0);
+        assert_eq!(result.vertex_count(), cube.vertex_count());
+        assert_no_nan(&result);
+    }
+
+    #[test]
+    fn mirror_degenerate_normal_returns_identity() {
+        let cube = cube_mesh();
+        let result = mirror_across_plane(&cube, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        assert_eq!(result.vertex_count(), cube.vertex_count());
+        assert_no_nan(&result);
+    }
+
+    #[test]
+    fn mirror_xy_plane_flips_z() {
+        let cube = cube_mesh();
+        let input_verts = cube.vertex_count();
+        // Mirror across XY plane (normal (0,0,1), through origin).
+        // Cube is [0,1]^3 so all z >= 0. Mirrored half should have z <= 0.
+        let result = mirror_across_plane(&cube, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0);
+        assert!(
+            result.vertex_count() >= 2 * input_verts,
+            "mirror across XY should double vertices"
+        );
+        let mut found_negative_z = false;
+        for vi in input_verts..result.vertex_count() {
+            let z = result.positions[vi * 3 + 2];
+            if z < -0.01 {
+                found_negative_z = true;
+                break;
+            }
+        }
+        assert!(found_negative_z, "mirrored half should have negative-z vertices");
+        assert_no_nan(&result);
+        assert_indices_in_bounds(&result);
+    }
+}

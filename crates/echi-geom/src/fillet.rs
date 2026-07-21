@@ -22,12 +22,33 @@ const MIN_EDGE_LENGTH: f32 = 1e-6;
 
 /// Apply a fillet to all sharp edges of `mesh`.
 pub fn apply_fillet(mesh: &Mesh, radius: f32) -> Mesh {
-    apply_edge_bevel(mesh, radius, BevelKind::Fillet)
+    let sharp = detect_sharp_edges(mesh);
+    let edges: Vec<(u32, u32)> = sharp.iter().map(|e| (e.v0, e.v1)).collect();
+    apply_fillet_edges(mesh, radius, &edges)
 }
 
 /// Apply a chamfer (flat 45° bevel) to all sharp edges of `mesh`.
 pub fn apply_chamfer(mesh: &Mesh, distance: f32) -> Mesh {
-    apply_edge_bevel(mesh, distance, BevelKind::Chamfer)
+    let sharp = detect_sharp_edges(mesh);
+    let edges: Vec<(u32, u32)> = sharp.iter().map(|e| (e.v0, e.v1)).collect();
+    apply_chamfer_edges(mesh, distance, &edges)
+}
+
+/// Apply a fillet to a specific set of edges, given as unordered
+/// `(vertex_a, vertex_b)` index pairs into `mesh`. Edges that are not real
+/// manifold edges (shared by exactly two triangles) are silently skipped,
+/// so callers can pass a UI-derived selection without sanitising it first.
+///
+/// An empty `edges` slice is a no-op — it bevels nothing. To fillet every
+/// sharp edge use [`apply_fillet`] instead.
+pub fn apply_fillet_edges(mesh: &Mesh, radius: f32, edges: &[(u32, u32)]) -> Mesh {
+    apply_edge_bevel(mesh, radius, BevelKind::Fillet, edges)
+}
+
+/// Apply a chamfer to a specific set of edges. See [`apply_fillet_edges`]
+/// for the selection semantics; an empty slice is a no-op.
+pub fn apply_chamfer_edges(mesh: &Mesh, distance: f32, edges: &[(u32, u32)]) -> Mesh {
+    apply_edge_bevel(mesh, distance, BevelKind::Chamfer, edges)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -36,13 +57,29 @@ enum BevelKind {
     Chamfer,
 }
 
-fn apply_edge_bevel(mesh: &Mesh, amount: f32, kind: BevelKind) -> Mesh {
-    if amount <= 0.0 {
+fn apply_edge_bevel(mesh: &Mesh, amount: f32, kind: BevelKind, edges: &[(u32, u32)]) -> Mesh {
+    if amount <= 0.0 || edges.is_empty() {
         return mesh.clone();
     }
 
-    let edges = detect_sharp_edges(mesh);
-    if edges.is_empty() {
+    // Resolve each requested (v0, v1) pair to a SharpEdge (with adjacent face
+    // normals). Pairs that aren't manifold edges — or whose endpoints are out
+    // of range — are dropped so a stale UI selection can't panic the beveler.
+    let mut resolved: Vec<SharpEdge> = Vec::with_capacity(edges.len());
+    let mut seen: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+    for (a, b) in edges {
+        if *a == *b || *a >= mesh.vertex_count() as u32 || *b >= mesh.vertex_count() as u32 {
+            continue;
+        }
+        let key = if a < b { (*a, *b) } else { (*b, *a) };
+        if !seen.insert(key) {
+            continue;
+        }
+        if let Some((n_a, n_b)) = edge_face_normals(mesh, *a, *b) {
+            resolved.push(SharpEdge { v0: *a, v1: *b, n_a, n_b });
+        }
+    }
+    if resolved.is_empty() {
         return mesh.clone();
     }
 
@@ -62,23 +99,33 @@ fn apply_edge_bevel(mesh: &Mesh, amount: f32, kind: BevelKind) -> Mesh {
     // "edge bevel" used in polygonal modeling.
 
     let mut builder = MeshBuilder::from_mesh(mesh);
-
-    // For each sharp edge, register a bevel. Each unique vertex pair is
-    // processed once.
-    let mut seen: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
-    for edge in &edges {
-        let key = if edge.v0 < edge.v1 {
-            (edge.v0, edge.v1)
-        } else {
-            (edge.v1, edge.v0)
-        };
-        if !seen.insert(key) {
-            continue;
-        }
+    for edge in &resolved {
         bevel_edge(&mut builder, edge, amount, kind);
     }
 
     builder.finish()
+}
+
+/// Look up the two face normals adjacent to the edge `(v0, v1)`.
+/// Returns `None` if the edge is not shared by exactly two triangles
+/// (boundary or non-manifold), so callers can treat it as "not an edge".
+fn edge_face_normals(mesh: &Mesh, v0: u32, v1: u32) -> Option<([f32; 3], [f32; 3])> {
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    for tri in mesh.indices.chunks(3) {
+        let a = tri[0];
+        let b = tri[1];
+        let c = tri[2];
+        let has_edge = (a == v0 && b == v1) || (b == v0 && c == v1) || (c == v0 && a == v1)
+            || (a == v1 && b == v0) || (b == v1 && c == v0) || (c == v1 && a == v0);
+        if has_edge {
+            normals.push(face_normal(mesh, a, b, c));
+        }
+    }
+    if normals.len() == 2 {
+        Some((normals[0], normals[1]))
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -448,5 +495,69 @@ mod tests {
         let mesh = cube_mesh();
         let result = apply_fillet(&mesh, 0.0);
         assert_eq!(result.indices.len(), mesh.indices.len());
+    }
+
+    #[test]
+    fn fillet_one_edge_adds_less_geometry_than_all_edges() {
+        // Bevelling a single cube edge must add fewer triangles than
+        // bevelling all 12 sharp edges. This is the core invariant of the
+        // per-edge selection API: the edge list is respected, not ignored.
+        let mesh = cube_mesh();
+
+        let one = apply_fillet_edges(&mesh, 0.1, &[(0, 1)]);
+        let all = apply_fillet(&mesh, 0.1);
+
+        // Sanity: the single-edge fillet actually did something.
+        assert!(one.indices.len() > mesh.indices.len(),
+            "single-edge fillet should add triangles (was {}, now {})",
+            mesh.indices.len(), one.indices.len());
+        assert!(one.vertex_count() > mesh.vertex_count(),
+            "single-edge fillet should add vertices");
+
+        // The payload of this test: one edge ≪ twelve edges worth of geometry.
+        assert!(one.indices.len() < all.indices.len(),
+            "one-edge fillet ({}) must produce fewer triangles than all-edges fillet ({})",
+            one.indices.len(), all.indices.len());
+    }
+
+    #[test]
+    fn fillet_edges_empty_is_no_op() {
+        let mesh = cube_mesh();
+        let result = apply_fillet_edges(&mesh, 0.1, &[]);
+        assert_eq!(result.indices.len(), mesh.indices.len());
+        assert_eq!(result.vertex_count(), mesh.vertex_count());
+    }
+
+    #[test]
+    fn fillet_edges_skips_non_edges_gracefully() {
+        // A vertex pair that is not a real mesh edge (the two vertices don't
+        // share a triangle) must be skipped, not panic.
+        let mesh = cube_mesh();
+        // 0 and 6 are opposite corners of the cube — no triangle contains both.
+        let result = apply_fillet_edges(&mesh, 0.1, &[(0, 6)]);
+        assert_eq!(result.indices.len(), mesh.indices.len(),
+            "non-edge pair should be skipped, leaving mesh unchanged");
+    }
+
+    #[test]
+    fn fillet_edges_no_nan_and_indices_in_bounds() {
+        let mesh = cube_mesh();
+        let result = apply_fillet_edges(&mesh, 0.1, &[(0, 1), (2, 3), (4, 5)]);
+        let n = result.vertex_count();
+        assert!(!result.positions.iter().any(|v| v.is_nan()), "no NaN in positions");
+        assert!(!result.normals.iter().any(|v| v.is_nan()), "no NaN in normals");
+        assert!(result.indices.iter().all(|&i| (i as usize) < n),
+            "all indices must stay in bounds after bevel");
+    }
+
+    #[test]
+    fn chamfer_one_edge_adds_less_geometry_than_all_edges() {
+        let mesh = cube_mesh();
+        let one = apply_chamfer_edges(&mesh, 0.1, &[(0, 1)]);
+        let all = apply_chamfer(&mesh, 0.1);
+        assert!(one.indices.len() > mesh.indices.len());
+        assert!(one.indices.len() < all.indices.len(),
+            "one-edge chamfer ({}) < all-edges chamfer ({})",
+            one.indices.len(), all.indices.len());
     }
 }

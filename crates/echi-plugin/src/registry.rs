@@ -1,5 +1,6 @@
 use crate::{GeneratorInfo, ParamDef, Plugin, PluginError, PluginInfo, ToolDefinition};
 use echi_core::sketch::Sketch;
+use echi_geom::Mesh;
 use std::collections::HashMap;
 
 /// Registry that holds all loaded plugins and provides lookup.
@@ -71,6 +72,28 @@ impl PluginRegistry {
         for plugin in &self.plugins {
             if plugin.id() == plugin_id {
                 return plugin.generate_sketch(generator_id, params);
+            }
+        }
+        Err(PluginError::Generic(format!(
+            "Plugin '{}' not found",
+            plugin_id
+        )))
+    }
+
+    /// Generate a solid mesh from a plugin's feature generator.
+    /// Mirrors [`generate_sketch`](Self::generate_sketch) but dispatches to
+    /// [`Plugin::generate_solid`]. Plugins that don't override the solid
+    /// method return their default "not supported" error, which the caller
+    /// is expected to surface (design principle #8 — errors must be visible).
+    pub fn generate_solid(
+        &self,
+        plugin_id: &str,
+        generator_id: &str,
+        params: &HashMap<String, f64>,
+    ) -> Result<Mesh, PluginError> {
+        for plugin in &self.plugins {
+            if plugin.id() == plugin_id {
+                return plugin.generate_solid(generator_id, params);
             }
         }
         Err(PluginError::Generic(format!(

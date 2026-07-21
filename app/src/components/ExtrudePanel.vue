@@ -25,8 +25,10 @@
       <input type="number" step="0.5" min="0" max="15" v-model.number="localDraft" @change="onChange" class="param-num" />
     </div>
     <div class="param-actions">
-      <button class="btn-primary" @click="onConfirm">确认拉伸</button>
-      <button class="btn-cancel" @click="onCancel">取消</button>
+      <button class="btn-primary" :disabled="loading" @click="onConfirm">
+        {{ loading ? "处理中..." : "确认拉伸" }}
+      </button>
+      <button class="btn-cancel" :disabled="loading" @click="onCancel">取消</button>
     </div>
   </div>
 </template>
@@ -51,6 +53,7 @@ const localDir = ref(props.direction);
 const localDepth = ref(props.depth);
 const localDist2 = ref(props.dist2);
 const localDraft = ref(props.draft);
+const loading = ref(false);
 
 watch(() => props.direction, v => { localDir.value = v; });
 watch(() => props.depth, v => { localDepth.value = v; });
@@ -66,8 +69,16 @@ function onChange() {
   });
 }
 
-function onConfirm() { emit("confirm"); }
+function onConfirm() {
+  loading.value = true;
+  emit("confirm");
+}
 function onCancel() { emit("cancel"); }
+
+/** Allow the parent to reset the loading state after the async operation completes. */
+function resetLoading() { loading.value = false; }
+
+defineExpose({ resetLoading });
 </script>
 
 <style scoped>
@@ -98,9 +109,15 @@ function onCancel() { emit("cancel"); }
   border-radius: 3px; cursor: pointer; font-size: 12px; flex: 1;
 }
 .btn-primary:hover { background: #0098ff; }
+.btn-primary:disabled {
+  background: #555; cursor: not-allowed; opacity: 0.6;
+}
 .btn-cancel {
   background: #3c3c3c; border: 1px solid #555; color: #e0e0e0;
   padding: 6px 16px; border-radius: 3px; cursor: pointer; font-size: 12px;
 }
 .btn-cancel:hover { background: #505050; }
+.btn-cancel:disabled {
+  opacity: 0.5; cursor: not-allowed;
+}
 </style>

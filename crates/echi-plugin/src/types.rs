@@ -1,4 +1,5 @@
 use echi_core::sketch::Sketch;
+use echi_geom::Mesh;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
@@ -91,6 +92,22 @@ pub trait Plugin: Send + Sync {
         Err(PluginError::Generic("not implemented".into()))
     }
 
+    /// Generate a solid (triangle mesh) directly from a feature generator.
+    ///
+    /// This is the solid-body counterpart to [`generate_sketch`](Self::generate_sketch):
+    /// plugins that can produce 3D geometry (e.g. an extruded gear body)
+    /// override this. The default implementation returns an error so that
+    /// plugins written against the older sketch-only API still compile and
+    /// simply report "not supported" when asked for a solid.
+    fn generate_solid(
+        &self,
+        generator_id: &str,
+        params: &HashMap<String, f64>,
+    ) -> Result<Mesh, PluginError> {
+        let _ = (generator_id, params);
+        Err(PluginError::Generic("solid generation not supported".into()))
+    }
+
     /// UI tools this plugin contributes.
     fn tools(&self) -> Vec<ToolDefinition> {
         Vec::new()
@@ -112,4 +129,91 @@ pub trait Plugin: Send + Sync {
 /// Helper to resolve parameter values with defaults.
 pub fn resolve_param(params: &HashMap<String, f64>, def: &ParamDef) -> f64 {
     params.get(&def.id).copied().unwrap_or(def.default_value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal plugin that only implements `generate_solid`, used to verify
+    /// the registry passthrough dispatches correctly.
+    struct StubSolidPlugin;
+
+    impl Plugin for StubSolidPlugin {
+        fn id(&self) -> &str { "stub.solid" }
+        fn name(&self) -> &str { "Stub Solid" }
+        fn version(&self) -> &str { "0.0.1" }
+        fn description(&self) -> &str { "test plugin" }
+
+        fn generate_solid(
+            &self,
+            generator_id: &str,
+            _params: &HashMap<String, f64>,
+        ) -> Result<Mesh, PluginError> {
+            if generator_id != "cube" {
+                return Err(PluginError::Generic(format!(
+                    "unknown generator: {}",
+                    generator_id
+                )));
+            }
+            // Trivial two-triangle quad in the XY plane — enough to prove the
+            // mesh travelled through the dispatch unchanged.
+            Ok(Mesh {
+                positions: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0],
+                normals: vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+                indices: vec![0, 1, 2, 0, 2, 3],
+            })
+        }
+    }
+
+    #[test]
+    fn default_generate_solid_returns_not_supported() {
+        // A plugin that doesn't override generate_solid must still compile and
+        // return the canonical "not supported" error.
+        struct SketchOnly;
+        impl Plugin for SketchOnly {
+            fn id(&self) -> &str { "sketch.only" }
+            fn name(&self) -> &str { "SketchOnly" }
+            fn version(&self) -> &str { "0.0.1" }
+            fn description(&self) -> &str { "no solid" }
+        }
+        let plugin = SketchOnly;
+        let params = HashMap::new();
+        let err = plugin.generate_solid("anything", &params).unwrap_err();
+        match err {
+            PluginError::Generic(msg) => assert!(msg.contains("not supported"), "got: {}", msg),
+            other => panic!("expected Generic, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn registry_generate_solid_dispatches_to_plugin() {
+        let mut registry = crate::PluginRegistry::new();
+        registry.register(Box::new(StubSolidPlugin)).unwrap();
+        let params = HashMap::new();
+        let mesh = registry.generate_solid("stub.solid", "cube", &params).expect("mesh");
+        assert_eq!(mesh.vertex_count(), 4);
+        assert_eq!(mesh.indices.len(), 6);
+    }
+
+    #[test]
+    fn registry_generate_solid_errors_when_plugin_missing() {
+        let registry = crate::PluginRegistry::new();
+        let params = HashMap::new();
+        let err = registry.generate_solid("does.not.exist", "cube", &params).unwrap_err();
+        assert!(matches!(err, PluginError::Generic(_)));
+    }
+
+    #[test]
+    fn registry_generate_solid_propagates_generator_error() {
+        let mut registry = crate::PluginRegistry::new();
+        registry.register(Box::new(StubSolidPlugin)).unwrap();
+        let params = HashMap::new();
+        // Plugin exists but the generator id is wrong → its error must surface.
+        let err = registry.generate_solid("stub.solid", "missing_gen", &params).unwrap_err();
+        match err {
+            PluginError::Generic(msg) => assert!(msg.contains("unknown generator"), "got: {}", msg),
+            other => panic!("expected Generic, got {:?}", other),
+        }
+    }
 }

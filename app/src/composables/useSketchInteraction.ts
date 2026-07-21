@@ -19,18 +19,29 @@ export interface SnapResult {
 export interface SketchInteractionState {
   // Line drawing
   lineStartId: Ref<EntityId | null>;
+  /// Deferred start-point for line — stored when the first click does not snap
+  /// to an existing point.  addPoint is called only on the second click, right
+  /// before addLine, so that cancelling mid-draw leaves no orphan entity.
+  lineStartPos: Ref<{ x: number; y: number } | null>;
   // Rectangle drawing
   rectStart: Ref<{ x: number; y: number } | null>;
   // Arc drawing (3-step)
   arcCenterId: Ref<EntityId | null>;
+  arcCenterPos: Ref<{ x: number; y: number } | null>;
   arcRadiusPoint: Ref<{ x: number; y: number } | null>;
   arcRadiusSet: Ref<boolean>;
   // Circle drawing
   circleCenterId: Ref<EntityId | null>;
+  circleCenterPos: Ref<{ x: number; y: number } | null>;
   // Spline / multi-point
   splinePoints: Ref<EntityId[]>;
   // Ellipse
   ellipseCenterId: Ref<EntityId | null>;
+  ellipseCenterPos: Ref<{ x: number; y: number } | null>;
+  /// Entity IDs created during the current drawing gesture that have not yet
+  /// been "confirmed" by completing the shape. On cancel (Esc, tool switch,
+  /// right-click), the viewport deletes every id in this list to avoid orphans.
+  pendingPointIds: Ref<EntityId[]>;
   // Drag/select
   isDragging: Ref<boolean>;
   dragId: Ref<EntityId | null>;
@@ -43,13 +54,18 @@ export interface SketchInteractionState {
 export function createSketchState(): SketchInteractionState {
   return {
     lineStartId: ref(null),
+    lineStartPos: ref(null),
     rectStart: ref(null),
     arcCenterId: ref(null),
+    arcCenterPos: ref(null),
     arcRadiusPoint: ref(null),
     arcRadiusSet: ref(false),
     circleCenterId: ref(null),
+    circleCenterPos: ref(null),
     splinePoints: ref([]),
     ellipseCenterId: ref(null),
+    ellipseCenterPos: ref(null),
+    pendingPointIds: ref([]),
     isDragging: ref(false),
     dragId: ref(null),
     activeSnap: ref(null),
@@ -60,15 +76,24 @@ export function createSketchState(): SketchInteractionState {
 
 /// Reset all drawing state. Called when the active tool changes or the
 /// user presses Esc / right-click in empty space.
+/// NOTE: Does NOT delete pending entities — the caller is responsible for
+/// calling `deleteEntity` on each id in `state.pendingPointIds.value` before
+/// or after this call.
 export function resetDrawingState(state: SketchInteractionState) {
   state.lineStartId.value = null;
+  state.lineStartPos.value = null;
   state.rectStart.value = null;
   state.arcCenterId.value = null;
+  state.arcCenterPos.value = null;
   state.arcRadiusPoint.value = null;
   state.arcRadiusSet.value = false;
   state.circleCenterId.value = null;
+  state.circleCenterPos.value = null;
   state.ellipseCenterId.value = null;
+  state.ellipseCenterPos.value = null;
   state.splinePoints.value = [];
+  // pendingPointIds is intentionally NOT cleared here — the caller must
+  // drain it so pending ids can be deleted via deleteEntity.
 }
 
 /// Find the closest existing point to (wx, wy) within `threshold` sketch units.

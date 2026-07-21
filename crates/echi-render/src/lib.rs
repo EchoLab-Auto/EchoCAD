@@ -3,5 +3,5 @@
 pub mod mesh;
 pub mod regenerate;
 
-pub use mesh::{RenderMesh, triangulate_solid};
-pub use regenerate::{RegenResult, regenerate};
+pub use mesh::RenderMesh;
+pub use regenerate::{RegenResult, SolidGenerator, regenerate, regenerate_with};

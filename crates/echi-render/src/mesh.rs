@@ -17,11 +17,3 @@ impl From<&Mesh> for RenderMesh {
         }
     }
 }
-
-pub fn triangulate_solid(_mesh: &Mesh) -> RenderMesh {
-    RenderMesh {
-        positions: Vec::new(),
-        normals: Vec::new(),
-        indices: Vec::new(),
-    }
-}

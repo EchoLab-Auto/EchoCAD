@@ -1,179 +1,34 @@
 <template>
   <div class="main-layout" @keydown="onKeyDown" tabindex="0" ref="layoutRoot">
-    <header class="toolbar">
-      <span class="title">EchoCAD</span>
-
-      <!-- File menu -->
-      <div class="tb-menu">
-        <button class="tb-menu-btn" :class="{ open: openMenuId==='file' }" @click.stop="toggleMenu('file')">文件 ▾</button>
-        <div v-if="openMenuId==='file'" class="tb-dropdown" @click.stop>
-          <button v-for="mi in menuFile" :key="mi.label" class="tb-dd-item" @click="mi.action(); closeAllMenus()">
-            {{ mi.label }}<span class="mm-key">{{ mi.key }}</span>
-          </button>
-          <div v-if="recentFiles.length > 0" class="recent-section">
-            <div class="recent-header">最近打开</div>
-            <button
-              v-for="(path, i) in recentFiles"
-              :key="path"
-              class="tb-dd-item recent-item"
-              :title="path"
-              @click="openRecent(path); closeAllMenus()"
-            >
-              <span class="recent-name">{{ basename(path) }}</span>
-              <span v-if="i === 0" class="mm-key">最近</span>
-            </button>
-            <button class="tb-dd-item recent-clear" @click="clearRecent(); closeAllMenus()">
-              清空列表
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Edit menu -->
-      <div class="tb-menu">
-        <button class="tb-menu-btn" :class="{ open: openMenuId==='edit' }" @click.stop="toggleMenu('edit')">编辑 ▾</button>
-        <div v-if="openMenuId==='edit'" class="tb-dropdown" @click.stop>
-          <button v-for="mi in menuEdit" :key="mi.label" class="tb-dd-item" @click="mi.action(); closeAllMenus()">
-            {{ mi.label }}<span class="mm-key">{{ mi.key }}</span>
-          </button>
-        </div>
-      </div>
-
-      <div class="tb-sep"></div>
-
-      <!-- Quick feature buttons (SolidWorks-like) -->
-      <template v-if="!isEditingSketch">
-        <button class="tb-quick-btn" @click="showExtrudePanel" title="拉伸 (E)">🧊 拉伸</button>
-        <button class="tb-quick-btn" @click="revolve" title="旋转 (W)">🔄 旋转</button>
-        <button class="tb-quick-btn" @click="addSweep" title="扫描">〰️ 扫描</button>
-        <button class="tb-quick-btn" @click="addFillet" title="圆角">🔵 圆角</button>
-        <button class="tb-quick-btn" @click="addChamfer" title="倒角">🔻 倒角</button>
-        <button class="tb-quick-btn" @click="addShell" title="抽壳">🫙 抽壳</button>
-      </template>
-
-      <!-- Sketch tools — shown when editing a sketch -->
-      <template v-if="isEditingSketch">
-        <div class="tb-menu">
-          <button class="tb-menu-btn" :class="{ open: openMenuId==='sketch' }" @click.stop="toggleMenu('sketch')">草图 ▾</button>
-          <div v-if="openMenuId==='sketch'" class="tb-dropdown" @click.stop>
-            <div class="mm-grid">
-              <button v-for="t in sketchTools" :key="t.value"
-                :class="{ active: sketchStore.activeTool === t.value }"
-                @click="sketchStore.setTool(t.value); closeAllMenus()">
-                {{ t.label }}<span class="mm-key">{{ t.shortcut }}</span>
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div class="tb-menu">
-          <button class="tb-menu-btn" :class="{ open: openMenuId==='constraints' }" @click.stop="toggleMenu('constraints')">约束 ▾</button>
-          <div v-if="openMenuId==='constraints'" class="tb-dropdown" @click.stop>
-            <div class="mm-grid mm-2col">
-              <button v-for="c in constraintItems" :key="c.label" @click="c.action(); closeAllMenus()">{{ c.label }}</button>
-            </div>
-          </div>
-        </div>
-        <div class="tb-sep"></div>
-        <button class="tb-quick-btn" @click="showExtrudePanel" title="拉伸 (E)">🧊 拉伸</button>
-        <button class="tb-quick-btn" @click="revolve" title="旋转 (W)">🔄 旋转</button>
-        <button class="tb-exit-sketch" @click="exitSketchEdit" title="退出草图编辑模式">✕ 退出草图</button>
-      </template>
-
-      <!-- Features -->
-      <div class="tb-menu">
-        <button class="tb-menu-btn" :class="{ open: openMenuId==='features' }" @click.stop="toggleMenu('features')">特征 ▾</button>
-        <div v-if="openMenuId==='features'" class="tb-dropdown" @click.stop>
-          <div class="mm-grid mm-2col">
-            <button v-for="f in featureItems" :key="f.label" @click="f.action(); closeAllMenus()">
-              {{ f.label }}<span class="mm-key">{{ f.key }}</span>
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Pattern -->
-      <div class="tb-menu">
-        <button class="tb-menu-btn" :class="{ open: openMenuId==='pattern' }" @click.stop="toggleMenu('pattern')">阵列 ▾</button>
-        <div v-if="openMenuId==='pattern'" class="tb-dropdown" @click.stop>
-          <div class="mm-list">
-            <button v-for="p in patternItems" :key="p.label" @click="p.action(); closeAllMenus()">{{ p.label }}</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="tb-sep"></div>
-
-      <!-- Plugin -->
-      <div v-if="sketchStore.generators.length>0" class="tb-menu">
-        <button class="tb-menu-btn" :class="{ open: openMenuId==='plugins' }" @click.stop="toggleMenu('plugins')">插件 ▾</button>
-        <div v-if="openMenuId==='plugins'" class="tb-dropdown" @click.stop>
-          <div class="mm-list">
-            <button v-for="g in sketchStore.generators" :key="g.id"
-              @click="openPluginDialog(g); closeAllMenus()">{{ g.name }}</button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Plane selector (disabled while editing — plane is fixed per sketch) -->
-      <select
-        v-model="sketchStore.activePlane"
-        class="tb-plane"
-        :disabled="isEditingSketch"
-        :title="isEditingSketch ? '草图平面在创建时确定，编辑中不可修改' : '新草图的基准平面'"
-      >
-        <option v-for="p in planes" :key="p.value" :value="p.value">{{ p.label }}</option>
-      </select>
-
-      <div class="tb-spacer"></div>
-
-      <button class="tb-icon-btn" @click="undoAction" title="撤销 Ctrl+Z">↩</button>
-      <button class="tb-icon-btn" @click="redoAction" title="重做 Ctrl+Y">↪</button>
-    </header>
+    <Toolbar
+      ref="toolbarRef"
+      :recent-files="recentFiles"
+      @file-action="onFileAction"
+      @open-recent="openRecent"
+      @clear-recent="clearRecent"
+      @undo="undoAction"
+      @redo="redoAction"
+      @new-sketch="newSketch"
+      @clear-doc="clearDoc"
+      @feature="onFeatureAction"
+      @pattern="onPatternAction"
+      @constraint="onConstraintAction"
+      @exit-sketch="exitSketchEdit"
+      @open-plugin="openPluginDialog"
+      @offset-plane="openOffsetDialog"
+      @clear-sketch="clearSketchAction"
+    />
 
     <div class="workspace">
-      <!-- Left sidebar: Feature tree -->
+      <!-- Left sidebar: Feature tree + plugins -->
       <aside class="sidebar-left">
-        <div class="panel">
-          <h3>特征树
-            <span v-if="regenErrorCount > 0" class="err-badge" :title="`${regenErrorCount} 个特征失败`">
-              {{ regenErrorCount }} 错误
-            </span>
-          </h3>
-          <ul class="feature-tree">
-            <li
-              v-for="feature in sketchStore.features"
-              :key="feature.id"
-              :class="{
-                active: sketchStore.activeFeatureId === feature.id,
-                selected: selectedFeature?.id === feature.id,
-                suppressed: feature.suppressed,
-                errored: !!feature.errors,
-              }"
-              @click="selectFeature(feature.id)"
-              @dblclick="editFeature(feature)"
-              @contextmenu="onFeatureContextMenu($event, feature.id)"
-            >
-              <button class="suppress-btn" :title="feature.suppressed ? '取消抑制' : '抑制特征'"
-                @click.stop="toggleSuppress(feature)">
-                {{ feature.suppressed ? '◌' : '●' }}
-              </button>
-              <span class="fi-arrow" v-if="feature.feature_type!=='Sketch' && !feature.feature_type.startsWith('Custom:')">└</span>
-              <span class="feature-icon">{{ featureIcon(feature.feature_type) }}</span>
-              <span class="fi-name">{{ feature.name }}</span>
-              <span v-if="feature.errors" class="err-icon" :title="feature.errors">⚠</span>
-              <button class="delete-btn" @click.stop="deleteFeature(feature.id)" title="删除">×</button>
-            </li>
-          </ul>
-          <!-- Context menu -->
-          <div v-if="ctxMenu" class="ctx-menu" :style="{ left: ctxMenu.x+'px', top: ctxMenu.y+'px' }" @click.stop>
-            <button @click="ctxEditSketch">编辑草图</button>
-            <button @click="ctxFaceNormal">正视于草图</button>
-            <button @click="ctxRename">重命名</button>
-            <button @click="ctxToggleSuppress">{{ ctxFeatureSuppressed ? '取消抑制' : '抑制' }}</button>
-            <button @click="ctxDelete" class="ctx-danger">删除</button>
-          </div>
-        </div>
+        <FeatureTree
+          @select="selectFeature"
+          @edit="editFeature"
+          @contextmenu="onFeatureContextMenu"
+          @toggle-suppress="toggleSuppress"
+          @delete="deleteFeature"
+        />
 
         <!-- Plugin panel -->
         <div class="panel" v-if="sketchStore.plugins.length > 0">
@@ -193,81 +48,23 @@
 
       <!-- Main viewport -->
       <main class="viewport">
-        <UnifiedViewport ref="unifiedViewport" @faceSelected="onFaceSelected" />
+        <UnifiedViewport ref="unifiedViewport" @faceSelected="onFaceSelected" @drag-end="onDragEnd" />
       </main>
 
       <!-- Right sidebar: Properties -->
       <aside class="sidebar-right">
-        <div class="panel">
-          <h3>属性</h3>
-
-          <!-- Extrude configuration panel -->
-          <ExtrudePanel
-            v-if="sketchStore.showExtrudePanel"
-            :direction="sketchStore.extrudeConfig.direction"
-            :depth="sketchStore.extrudeConfig.depth"
-            :dist2="sketchStore.extrudeConfig.dist2"
-            :draft="sketchStore.extrudeConfig.draft"
-            @change="onExtrudeConfigChange"
-            @confirm="doExtrude"
-            @cancel="cancelExtrude"
-          />
-
-          <!-- Feature properties -->
-          <div v-else-if="selectedFeature" class="prop-section">
-            <div class="prop-row"><label>类型</label><span>{{ selectedFeature.feature_type }}</span></div>
-            <div class="prop-row">
-              <label>名称</label>
-              <input type="text" :value="selectedFeature.name"
-                @change="renameSelectedFeature(($event.target as HTMLInputElement).value)" />
-            </div>
-            <div v-if="selectedFeature.errors" class="prop-error">
-              ⚠ {{ selectedFeature.errors }}
-            </div>
-            <div v-for="param in editableParameters(selectedFeature)" :key="param.id + '-' + param.name" class="prop-row">
-              <label>{{ param.name }}</label>
-              <input v-if="!param.readonly" type="number" step="0.1" :value="param.value"
-                @change="updateParam(param.id, $event)" />
-              <span v-else class="ro-val">{{ param.value.toFixed(2) }}</span>
-            </div>
-            <div class="prop-row" v-if="selectedFeature.has_dependents">
-              <label></label>
-              <span class="has-dep" title="其他特征依赖于此特征">⚠ 有依赖</span>
-            </div>
-          </div>
-
-          <!-- Entity properties -->
-          <div v-else-if="selectedEntity" class="prop-section">
-            <div class="prop-row"><label>类型</label><span>{{ selectedEntity.type }}</span></div>
-            <div class="prop-row"><label>ID</label><span>{{ selectedEntity.id }}</span></div>
-            <div v-if="selectedEntity.type==='Point'" class="prop-row">
-              <label>X</label>
-              <input type="number" step="0.1" :value="(selectedEntity as any).x"
-                @change="updateEntityProp(selectedEntity.id, 'x', $event)" />
-            </div>
-            <div v-if="selectedEntity.type==='Point'" class="prop-row">
-              <label>Y</label>
-              <input type="number" step="0.1" :value="(selectedEntity as any).y"
-                @change="updateEntityProp(selectedEntity.id, 'y', $event)" />
-            </div>
-            <div v-if="selectedEntity.type==='Circle' || selectedEntity.type==='Arc'" class="prop-row">
-              <label>半径</label>
-              <input type="number" step="0.1" :value="(selectedEntity as any).radius"
-                @change="updateEntityProp(selectedEntity.id, 'radius', $event)" />
-            </div>
-            <div v-if="selectedEntity.type==='Line'" class="prop-row">
-              <label>长度</label><span>{{ lineLength(selectedEntity as any).toFixed(2) }}</span>
-            </div>
-            <label v-if="selectedEntity && (selectedEntity.type==='Line' || selectedEntity.type==='Circle')" class="prop-check">
-              <input type="checkbox" :checked="!!(selectedEntity as any).construction"
-                @change="toggleConstruction(selectedEntity.id, $event)" />
-              构造线
-            </label>
-            <button v-if="selectedEntity" class="prop-del-btn" @click="deleteSelectedEntity">删除实体 (Del)</button>
-          </div>
-
-          <p v-else class="placeholder">选择特征或草图实体</p>
-        </div>
+        <PropertiesPanel
+          @rename="renameSelectedFeature"
+          @update-param="updateParam"
+          @update-entity-prop="updateEntityProp"
+          @toggle-construction="toggleConstruction"
+          @delete-entity="deleteSelectedEntity"
+          @delete-constraint="deleteConstraint"
+          @clear-constraints="clearAllConstraints"
+          @extrude-change="onExtrudeConfigChange"
+          @extrude-confirm="doExtrude"
+          @extrude-cancel="cancelExtrude"
+        />
       </aside>
     </div>
 
@@ -275,162 +72,87 @@
       <span class="status-text">{{ statusText }}</span>
     </footer>
 
-    <!-- Toast notifications -->
-    <div class="toast-container">
-      <div v-for="toast in toasts" :key="toast.id" :class="['toast', 'toast-' + toast.type]">
-        {{ toast.message }}
-      </div>
-    </div>
+    <ToastContainer />
 
-    <!-- Plugin generator dialog -->
-    <div v-if="activeDialog" class="dialog-overlay" @click.self="closeDialog">
-      <div class="dialog">
-        <h3>{{ activeDialog.name }}</h3>
-        <p class="dialog-desc">{{ activeDialog.description }}</p>
-        <div v-for="param in activeDialog.parameters" :key="param.id" class="dialog-param">
-          <label :title="param.description">{{ param.name }}</label>
-          <input type="number" :min="param.min ?? undefined" :max="param.max ?? undefined"
-            :step="param.step" v-model.number="dialogParams[param.id]" />
-        </div>
-        <div class="dialog-actions">
-          <button class="btn-primary" @click="runGenerator" :disabled="dialogLoading">
-            <span v-if="dialogLoading" class="btn-spinner"></span>
-            {{ dialogLoading ? '生成中...' : '生成' }}
-          </button>
-          <button class="btn-cancel" @click="closeDialog" :disabled="dialogLoading">取消</button>
-        </div>
-      </div>
-    </div>
+    <PluginDialog
+      :generator="activeDialog"
+      :loading="dialogLoading"
+      @run="runGenerator"
+      @cancel="closeDialog"
+    />
 
-    <!-- Confirm cascade delete dialog -->
-    <div v-if="cascadeDialog" class="dialog-overlay" @click.self="cancelCascade">
-      <div class="dialog">
-        <h3>删除 "{{ cascadeDialog.name }}"？</h3>
-        <p class="dialog-desc">
-          该特征有 {{ cascadeDialog.dependents.length }} 个依赖项。删除它将同时删除：
-          <strong>{{ cascadeDialog.dependents.join(', ') }}</strong>
-        </p>
-        <div class="dialog-actions">
-          <button class="btn-danger" @click="confirmCascadeDelete">级联删除</button>
-          <button class="btn-cancel" @click="cancelCascade">取消</button>
-        </div>
-      </div>
-    </div>
+    <CascadeDeleteDialog
+      :target="cascadeDialog"
+      @confirm="confirmCascadeDelete"
+      @cancel="cancelCascade"
+    />
+
+    <BooleanDialog
+      :targets="booleanDialog"
+      @confirm="confirmBoolean"
+      @cancel="cancelBoolean"
+    />
+
+    <OffsetPlaneDialog
+      :open="offsetDialogOpen"
+      @confirm="confirmOffsetPlane"
+      @cancel="cancelOffset"
+    />
+
+    <!-- Feature-tree right-click menu (position: fixed, so DOM location is irrelevant) -->
+    <ContextMenu
+      :target="ctxMenu"
+      :suppressed="ctxFeatureSuppressed"
+      @edit-sketch="ctxEditSketch"
+      @face-normal="ctxFaceNormal"
+      @rename="ctxRename"
+      @toggle-suppress="ctxToggleSuppress"
+      @delete="ctxDelete"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, nextTick, onMounted, onUnmounted } from "vue";
 import UnifiedViewport from "@/components/UnifiedViewport.vue";
-import ExtrudePanel from "@/components/ExtrudePanel.vue";
+import Toolbar, {
+  type FileAction,
+  type FeatureKind,
+  type PatternKind,
+  type ConstraintKind,
+} from "@/components/Toolbar.vue";
+import FeatureTree from "@/components/FeatureTree.vue";
+import ContextMenu, { type CtxTarget } from "@/components/ContextMenu.vue";
+import PropertiesPanel from "@/components/PropertiesPanel.vue";
+import ToastContainer from "@/components/ToastContainer.vue";
+import PluginDialog from "@/components/PluginDialog.vue";
+import CascadeDeleteDialog, { type CascadeTarget } from "@/components/CascadeDeleteDialog.vue";
+import BooleanDialog, { type BooleanTargets, type BooleanResult } from "@/components/BooleanDialog.vue";
+import OffsetPlaneDialog, { type OffsetPlaneResult } from "@/components/OffsetPlaneDialog.vue";
 import { useSketchStore } from "@/stores/sketch";
-
-// ── Dropdown menu state ──────────────────────────────────────────
-
-const openMenuId = ref<string | null>(null);
-function toggleMenu(id: string) {
-  openMenuId.value = openMenuId.value === id ? null : id;
-}
-function closeAllMenus() {
-  openMenuId.value = null;
-}
-
-interface MenuItem { label: string; action: () => void; key?: string; }
-
-const menuFile: MenuItem[] = [
-  { label: "新建", action: () => { clearDoc(); }, key: "Ctrl+N" },
-  { label: "打开", action: () => { loadProjectFile(); }, key: "Ctrl+O" },
-  { label: "保存", action: () => { saveProjectFile(); }, key: "Ctrl+S" },
-  { label: "另存为...", action: () => { saveProjectFile(); } },
-  { label: "导出 STL", action: () => { exportStlFile(); } },
-  { label: "导出 OBJ", action: () => { exportObjFile(); } },
-];
-
-const recentFiles = ref<string[]>([]);
-
-async function refreshRecent() {
-  try {
-    recentFiles.value = await getRecentFiles();
-  } catch {
-    recentFiles.value = [];
-  }
-}
-
-function basename(path: string): string {
-  const parts = path.split(/[\\/]/);
-  return parts[parts.length - 1] || path;
-}
-
-async function openRecent(path: string) {
-  try {
-    await loadProjectFrom(path);
-    selectedFeatureId.value = null;
-    const features = await getFeatures();
-    const firstSketch = features.find(f => f.feature_type === "Sketch" || f.feature_type.startsWith("Custom:"));
-    if (firstSketch) sketchStore.setActiveFeature(firstSketch.id);
-    await loadState();
-    await unifiedViewport.value?.refreshViewport();
-    showToast("success", `已加载: ${basename(path)}`);
-  } catch (err) {
-    showToast("error", `加载失败: ${err}`);
-  }
-}
-
-async function clearRecent() {
-  await clearRecentFiles();
-  recentFiles.value = [];
-}
-
-const menuEdit: MenuItem[] = [
-  { label: "撤销", action: () => { undoAction(); }, key: "Ctrl+Z" },
-  { label: "重做", action: () => { redoAction(); }, key: "Ctrl+Y" },
-  { label: "新草图", action: () => { newSketch(); }, key: "N" },
-  { label: "清空文档", action: () => { clearDoc(); } },
-];
-
-const constraintItems = [
-  { label: "水平", action: addHorizontal }, { label: "竖直", action: addVertical },
-  { label: "平行", action: addParallel }, { label: "垂直", action: addPerpendicular },
-  { label: "相切", action: addTangent }, { label: "同心", action: addConcentric },
-  { label: "相等", action: addEqual }, { label: "中点", action: addMidpoint },
-  { label: "固定", action: addFixPoint }, { label: "角度", action: addAngle },
-  { label: "直径", action: addDiameter }, { label: "距离", action: addDistance },
-  { label: "求解", action: solve },
-];
-
-const featureItems = [
-  { label: "拉伸", action: showExtrudePanel, key: "E" },
-  { label: "旋转", action: revolve, key: "W" },
-  { label: "扫描", action: addSweep },
-  { label: "圆角", action: addFillet },
-  { label: "倒角", action: addChamfer },
-  { label: "抽壳", action: addShell },
-  { label: "布尔运算", action: addBoolean },
-];
-
-const patternItems = [
-  { label: "线性阵列", action: addLinearPattern },
-  { label: "圆周阵列", action: addCircularPattern },
-  { label: "镜像", action: addMirror },
-];
+import { useToastStore } from "@/stores/toast";
 
 import {
   addConstraint, solveSketch,
   updateEntityProp as updateEntityPropCmd,
   deleteEntity as deleteEntityCmd,
-  getSketchEntities, clearDocument,
+  removeConstraint,
+  getSketchEntities, clearDocument, clearSketch,
   getFeatures, setActiveSketch,
   addSketchFeature, deleteFeature as deleteFeatureCmd,
   renameFeature as renameFeatureCmd,
   setFeatureSuppressed as setFeatureSuppressedCmd,
   updateParameter, addExtrudeFeature,
-  addRevolveFeature, addFilletFeature, addChamferFeature,
+  addRevolveFeature,
+  addFilletEdgesFeature, addChamferEdgesFeature,
+  createOffsetPlane,
   addLinearPattern as addLinearPatternCmd,
   addCircularPattern as addCircularPatternCmd,
   addMirrorFeature, addSweepFeature, addShellFeature,
   addBooleanFeature as addBooleanFeatureCmd,
   previewExtrude,
-  saveProject, loadProject, loadProjectFrom, exportStl, exportObj,
+  saveProject, loadProject, loadProjectFrom, exportStl, exportObj, exportGltf,
+  checkRecovery,
   getRecentFiles, clearRecentFiles,
   undo, redo, listPlugins, listGenerators,
   generatePluginFeature,
@@ -439,51 +161,12 @@ import {
 } from "@/commands/sketch";
 
 const sketchStore = useSketchStore();
+const toastStore = useToastStore();
 const unifiedViewport = ref<InstanceType<typeof UnifiedViewport> | null>(null);
+const toolbarRef = ref<InstanceType<typeof Toolbar> | null>(null);
 const layoutRoot = ref<HTMLDivElement | null>(null);
 
-// Derive selectedFeature from the store so it always reflects the latest state.
-// We track an explicit "selection" separate from `activeFeatureId` because the
-// user can select a solid for inspection while a sketch is still being edited.
-const selectedFeatureId = ref<FeatureId | null>(null);
-const selectedFeature = computed<FeatureNode | null>(() => {
-  if (selectedFeatureId.value === null) return null;
-  return sketchStore.features.find(f => f.id === selectedFeatureId.value) ?? null;
-});
-
-// Toast notifications
-interface Toast { id: number; type: "info" | "success" | "error"; message: string; }
-const toasts = ref<Toast[]>([]);
-let toastId = 0;
-
-function showToast(type: Toast["type"], message: string, duration = 3000) {
-  const id = ++toastId;
-  toasts.value.push({ id, type, message });
-  setTimeout(() => {
-    toasts.value = toasts.value.filter(t => t.id !== id);
-  }, duration);
-}
-
-const sketchTools = [
-  { value: "select" as const, label: "选择", shortcut: "Esc" },
-  { value: "line" as const, label: "直线", shortcut: "L" },
-  { value: "circle" as const, label: "圆", shortcut: "C" },
-  { value: "arc" as const, label: "弧线", shortcut: "A" },
-  { value: "rectangle" as const, label: "矩形", shortcut: "R" },
-  { value: "spline" as const, label: "样条", shortcut: "B" },
-  { value: "ellipse" as const, label: "椭圆", shortcut: "I" },
-];
-
 const isEditingSketch = computed(() => sketchStore.isEditingSketch());
-
-const selectedEntity = computed(() => {
-  if (!sketchStore.selectedId) return null;
-  return sketchStore.entities.find(e => e.id === sketchStore.selectedId) || null;
-});
-
-const regenErrorCount = computed(() =>
-  sketchStore.features.filter(f => f.errors).length
-);
 
 const statusText = computed(() => {
   if (sketchStore.showExtrudePanel) return "拉伸预览 — 在右侧面板调整参数";
@@ -503,36 +186,39 @@ const statusText = computed(() => {
   return "3D 视口 — 选择特征进行编辑";
 });
 
-const planes = [
-  { value: "xy", label: "XY 平面" },
-  { value: "yz", label: "YZ 平面" },
-  { value: "zx", label: "ZX 平面" },
-];
-
-function featureIcon(type: string): string {
-  if (type === "Sketch") return "📐";
-  if (type === "Extrude") return "🧊";
-  if (type === "Revolve") return "🔄";
-  if (type === "Fillet") return "🔵";
-  if (type === "Chamfer") return "🔻";
-  if (type === "LinearPattern") return "↔️";
-  if (type === "CircularPattern") return "🔁";
-  if (type === "Mirror") return "🪞";
-  if (type === "Sweep") return "〰️";
-  if (type === "Shell") return "🫙";
-  if (type.startsWith("Custom:") || type.startsWith("CustomSolid:")) {
-    const lower = type.toLowerCase();
-    if (lower.includes("gear") || lower.includes("spur")) return "⚙️";
-    if (lower.includes("spring")) return "🌀";
-    return "🔧";
-  }
-  return "📦";
+function basename(path: string): string {
+  const parts = path.split(/[\\/]/);
+  return parts[parts.length - 1] || path;
 }
 
-/// Parameters with a non-zero `id` are real (linked to a ParameterId).
-/// Parameters with id=0 are virtual (e.g., display-only count, or non-editable).
-function editableParameters(f: FeatureNode) {
-  return f.parameters;
+const recentFiles = ref<string[]>([]);
+
+async function refreshRecent() {
+  try {
+    recentFiles.value = await getRecentFiles();
+  } catch {
+    recentFiles.value = [];
+  }
+}
+
+async function openRecent(path: string) {
+  try {
+    await loadProjectFrom(path);
+    sketchStore.selectedFeatureId = null;
+    const features = await getFeatures();
+    const firstSketch = features.find(f => f.feature_type === "Sketch" || f.feature_type.startsWith("Custom:"));
+    if (firstSketch) sketchStore.setActiveFeature(firstSketch.id);
+    await loadState();
+    await unifiedViewport.value?.refreshViewport();
+    toastStore.success(`已加载: ${basename(path)}`);
+  } catch (err) {
+    toastStore.error(`加载失败: ${err}`);
+  }
+}
+
+async function clearRecent() {
+  await clearRecentFiles();
+  recentFiles.value = [];
 }
 
 // ── Data loading ─────────────────────────────────────────────────
@@ -553,8 +239,15 @@ async function refreshPlugins() {
 }
 
 async function loadState() {
-  await refreshFeatures();
-  await refreshSketch();
+  // `isLoading` is wired here so a future spinner can react to document loads.
+  // It was previously declared but never set.
+  sketchStore.isLoading = true;
+  try {
+    await refreshFeatures();
+    await refreshSketch();
+  } finally {
+    sketchStore.isLoading = false;
+  }
 }
 
 // ── Feature tree ─────────────────────────────────────────────────
@@ -565,7 +258,7 @@ async function loadState() {
  * right-click "编辑草图" menu (SolidWorks behavior).
  */
 async function selectFeature(id: FeatureId) {
-  selectedFeatureId.value = id;
+  sketchStore.selectedFeatureId = id;
   sketchStore.setActiveFeature(id);
   // If we're editing a different sketch, switching selection exits edit mode.
   if (sketchStore.editingSketchId !== null && sketchStore.editingSketchId !== id) {
@@ -586,7 +279,7 @@ async function enterSketchEdit(id: FeatureId) {
   const f = sketchStore.features.find(x => x.id === id);
   if (!f || !(f.feature_type === "Sketch" || f.feature_type.startsWith("Custom:"))) return;
 
-  selectedFeatureId.value = id;
+  sketchStore.selectedFeatureId = id;
   sketchStore.setActiveFeature(id);
   sketchStore.setEditingSketch(id);
   sketchStore.setTool("select");
@@ -612,7 +305,11 @@ function editFeature(feature: FeatureNode) {
 }
 
 function onFaceSelected(featureId: number, _faceIndex: number) {
-  selectedFeatureId.value = featureId;
+  sketchStore.selectedFeatureId = featureId;
+}
+
+function onDragEnd() {
+  unifiedViewport.value?.refreshViewport();
 }
 
 async function toggleSuppress(feature: FeatureNode) {
@@ -622,10 +319,12 @@ async function toggleSuppress(feature: FeatureNode) {
 }
 
 async function renameSelectedFeature(name: string) {
-  if (!selectedFeature.value) return;
-  if (!name || name === selectedFeature.value.name) return;
-  await renameFeatureCmd(selectedFeature.value.id, name);
+  const sel = sketchStore.selectedFeature;
+  if (!sel) return;
+  if (!name || name === sel.name) return;
+  await renameFeatureCmd(sel.id, name);
   await loadState();
+  await unifiedViewport.value?.refreshViewport();
 }
 
 // ── Feature operations ───────────────────────────────────────────
@@ -655,10 +354,10 @@ async function deleteFeature(id: FeatureId) {
   // when there are dependents.
   try {
     await deleteFeatureCmd(id, false);
-    if (selectedFeature.value?.id === id) selectedFeatureId.value = null;
+    if (sketchStore.selectedFeature?.id === id) sketchStore.selectedFeatureId = null;
     await loadState();
     await unifiedViewport.value?.refreshViewport();
-    showToast("success", `已删除 "${feature.name}"`);
+    toastStore.success(`已删除 "${feature.name}"`);
   } catch (err: any) {
     // Parse dependent names from the error message
     const msg = String(err);
@@ -669,8 +368,7 @@ async function deleteFeature(id: FeatureId) {
   }
 }
 
-interface CascadeDialog { id: FeatureId; name: string; dependents: string[] }
-const cascadeDialog = ref<CascadeDialog | null>(null);
+const cascadeDialog = ref<CascadeTarget | null>(null);
 
 async function confirmCascadeDelete() {
   if (!cascadeDialog.value) return;
@@ -678,12 +376,12 @@ async function confirmCascadeDelete() {
   cascadeDialog.value = null;
   try {
     await deleteFeatureCmd(id, true);
-    if (selectedFeature.value?.id === id) selectedFeatureId.value = null;
+    if (sketchStore.selectedFeature?.id === id) sketchStore.selectedFeatureId = null;
     await loadState();
     await unifiedViewport.value?.refreshViewport();
-    showToast("success", `已级联删除 "${name}" 及其依赖项`);
+    toastStore.success(`已级联删除 "${name}" 及其依赖项`);
   } catch (err: any) {
-    showToast("error", `删除失败: ${err}`);
+    toastStore.error(`删除失败: ${err}`);
   }
 }
 
@@ -693,10 +391,17 @@ function cancelCascade() {
 
 async function clearDoc() {
   await clearDocument();
-  selectedFeatureId.value = null;
+  sketchStore.selectedFeatureId = null;
   const features = await getFeatures();
   const firstSketch = features.find(f => f.feature_type === "Sketch" || f.feature_type.startsWith("Custom:"));
   if (firstSketch) sketchStore.setActiveFeature(firstSketch.id);
+  await loadState();
+  await unifiedViewport.value?.refreshViewport();
+}
+
+async function clearSketchAction() {
+  if (sketchStore.editingSketchId === null) return;
+  await clearSketch();
   await loadState();
   await unifiedViewport.value?.refreshViewport();
 }
@@ -721,7 +426,7 @@ function activeSketchForFeature(): FeatureId | null {
 
 async function showExtrudePanel() {
   if (activeSketchForFeature() === null) {
-    showToast("info", "请先选择一个草图");
+    toastStore.info("请先选择一个草图");
     return;
   }
   sketchStore.showExtrudePanel = true;
@@ -760,9 +465,9 @@ async function doExtrude() {
     await addExtrudeFeature(activeId, cfg.direction, cfg.dist2, cfg.draft, cfg.depth);
     await loadState();
     await unifiedViewport.value?.refreshViewport();
-    showToast("success", "拉伸特征已创建");
+    toastStore.success("拉伸特征已创建");
   } catch (err) {
-    showToast("error", `拉伸失败: ${err}`);
+    toastStore.error(`拉伸失败: ${err}`);
   }
 }
 
@@ -774,10 +479,10 @@ async function withFeatureAction<T>(label: string, fn: () => Promise<T>): Promis
     const result = await fn();
     await loadState();
     await unifiedViewport.value?.refreshViewport();
-    showToast("success", `${label}已创建`);
+    toastStore.success(`${label}已创建`);
     return result;
   } catch (err) {
-    showToast("error", `${label}失败: ${err}`);
+    toastStore.error(`${label}失败: ${err}`);
     return null;
   }
 }
@@ -785,7 +490,7 @@ async function withFeatureAction<T>(label: string, fn: () => Promise<T>): Promis
 async function revolve() {
   const activeId = activeSketchForFeature();
   if (activeId === null) {
-    showToast("info", "请先选择一个草图");
+    toastStore.info("请先选择一个草图");
     return;
   }
   const axisId = sketchStore.selectedId ?? null;
@@ -793,37 +498,57 @@ async function revolve() {
 }
 
 async function addFillet() {
-  const tid = lastSolidFeatureId();
+  const tid = selectedSolidFeatureId();
   if (tid === null) {
-    showToast("info", "请先创建一个实体");
+    toastStore.info("请先点击一个实体面（或选中实体特征）");
     return;
   }
-  await withFeatureAction("圆角特征", () => addFilletFeature(tid, 0.5));
+  // Create with all sharp edges (edges=[]); the radius is tunable live from
+  // the PropertiesPanel param scrubber after creation.
+  const id = await withFeatureAction("圆角特征", () => addFilletEdgesFeature(tid, 0.5, []));
+  if (id !== null) sketchStore.selectedFeatureId = id;
 }
 
 async function addChamfer() {
-  const tid = lastSolidFeatureId();
+  const tid = selectedSolidFeatureId();
   if (tid === null) {
-    showToast("info", "请先创建一个实体");
+    toastStore.info("请先点击一个实体面（或选中实体特征）");
     return;
   }
-  await withFeatureAction("倒角特征", () => addChamferFeature(tid, 0.5));
+  const id = await withFeatureAction("倒角特征", () => addChamferEdgesFeature(tid, 0.5, []));
+  if (id !== null) sketchStore.selectedFeatureId = id;
+}
+
+/// True for any feature that produces a solid body and therefore makes a
+/// valid fillet/chamfer/shell/boolean target. Includes pattern/mirror/boolean
+/// results and plugin-generated solids.
+function isSolidFeature(f: FeatureNode): boolean {
+  return !f.suppressed && (
+    ["Extrude", "Revolve", "Fillet", "Chamfer", "LinearPattern", "CircularPattern",
+      "Mirror", "Sweep", "Shell", "Boolean"].includes(f.feature_type) ||
+    f.feature_type.startsWith("CustomSolid")
+  );
+}
+
+/// The currently-selected solid, if any. Face picks in the viewport set
+/// `selectedFeatureId` to the clicked body, so this naturally reflects a
+/// face click as well as a feature-tree click.
+function selectedSolidFeatureId(): FeatureId | null {
+  const sel = sketchStore.selectedFeatureId;
+  if (sel === null) return null;
+  const f = sketchStore.features.find(x => x.id === sel);
+  return f && isSolidFeature(f) ? f.id : null;
 }
 
 function lastSolidFeatureId(): FeatureId | null {
-  const solids = sketchStore.features.filter(f =>
-    !f.suppressed && (
-      ["Extrude", "Revolve", "Fillet", "Chamfer", "LinearPattern", "CircularPattern", "Mirror", "Sweep", "Shell"].includes(f.feature_type) ||
-      f.feature_type.startsWith("CustomSolid")
-    )
-  );
+  const solids = sketchStore.features.filter(isSolidFeature);
   return solids.length > 0 ? solids[solids.length - 1].id : null;
 }
 
 async function addLinearPattern() {
   const tid = lastSolidFeatureId();
   if (tid === null) {
-    showToast("info", "请先创建一个实体");
+    toastStore.info("请先创建一个实体");
     return;
   }
   await withFeatureAction("线性阵列", () => addLinearPatternCmd(tid, 1.0, 0.0, 0.0, 3, 2.0));
@@ -832,7 +557,7 @@ async function addLinearPattern() {
 async function addCircularPattern() {
   const tid = lastSolidFeatureId();
   if (tid === null) {
-    showToast("info", "请先创建一个实体");
+    toastStore.info("请先创建一个实体");
     return;
   }
   await withFeatureAction("圆周阵列", () => addCircularPatternCmd(tid, 0, 0, 0, 0, 0, 1, 4, 360));
@@ -841,7 +566,7 @@ async function addCircularPattern() {
 async function addMirror() {
   const tid = lastSolidFeatureId();
   if (tid === null) {
-    showToast("info", "请先创建一个实体");
+    toastStore.info("请先创建一个实体");
     return;
   }
   await withFeatureAction("镜像特征", () => addMirrorFeature(tid, 1, 0, 0, 0, 0, 0));
@@ -850,35 +575,141 @@ async function addMirror() {
 async function addSweep() {
   const activeId = activeSketchForFeature();
   if (activeId === null) {
-    showToast("info", "请先选择一个草图");
+    toastStore.info("请先选择一个草图");
     return;
   }
   const otherSketches = sketchStore.features.filter(f => f.feature_type === "Sketch" && f.id !== activeId);
   if (otherSketches.length === 0) {
-    showToast("info", "需要两个草图：轮廓 + 路径");
+    toastStore.info("需要两个草图：轮廓 + 路径");
     return;
   }
   await withFeatureAction("扫描特征", () => addSweepFeature(activeId, otherSketches[0].id));
 }
 
 async function addShell() {
-  const tid = lastSolidFeatureId();
+  const tid = selectedSolidFeatureId();
   if (tid === null) {
-    showToast("info", "请先创建一个实体");
+    toastStore.info("请先点击一个实体面（或选中实体特征）");
     return;
   }
-  await withFeatureAction("抽壳特征", () => addShellFeature(tid, 0.5));
+  const id = await withFeatureAction("抽壳特征", () => addShellFeature(tid, 0.5));
+  if (id !== null) sketchStore.selectedFeatureId = id;
 }
 
+const booleanDialog = ref<BooleanTargets | null>(null);
+
+/// Open the boolean-op dialog. Target A defaults to the selected solid
+/// (so a face pick drives subtract/intersect order predictably); target B
+/// is the most recent *other* solid. If nothing is selected, A/B fall back
+/// to the two most recent solids in creation order. The dialog lets the
+/// user pick union/subtract/intersect and swap A↔B before confirming.
 async function addBoolean() {
-  const solids = sketchStore.features.filter(f =>
-    ["Extrude", "Revolve", "Fillet", "Chamfer", "Sweep", "Shell"].includes(f.feature_type)
-  );
+  const solids = sketchStore.features.filter(isSolidFeature);
   if (solids.length < 2) {
-    showToast("info", "布尔运算需要两个实体");
+    toastStore.info("布尔运算需要两个实体");
     return;
   }
-  await withFeatureAction("布尔特征", () => addBooleanFeatureCmd(solids[0].id, solids[1].id, "union"));
+  const sel = sketchStore.selectedFeatureId;
+  let a: FeatureNode;
+  let b: FeatureNode;
+  const selFeature = sel !== null ? solids.find(f => f.id === sel) : undefined;
+  if (selFeature) {
+    a = selFeature;
+    const others = solids.filter(f => f.id !== sel);
+    b = others[others.length - 1] ?? solids[solids.length - 1];
+  } else {
+    a = solids[solids.length - 1];
+    b = solids[solids.length - 2];
+  }
+  booleanDialog.value = { idA: a.id, nameA: a.name, idB: b.id, nameB: b.name };
+}
+
+async function confirmBoolean(result: BooleanResult) {
+  const { op, idA, idB } = result;
+  booleanDialog.value = null;
+  const id = await withFeatureAction("布尔特征", () => addBooleanFeatureCmd(idA, idB, op));
+  if (id !== null) sketchStore.selectedFeatureId = id;
+}
+
+function cancelBoolean() {
+  booleanDialog.value = null;
+}
+
+// ── Offset plane ─────────────────────────────────────────────────
+
+const offsetDialogOpen = ref(false);
+function openOffsetDialog() {
+  offsetDialogOpen.value = true;
+}
+function cancelOffset() {
+  offsetDialogOpen.value = false;
+}
+
+async function confirmOffsetPlane(result: OffsetPlaneResult) {
+  offsetDialogOpen.value = false;
+  try {
+    const id = await createOffsetPlane(result.basePlane, result.distance);
+    await refreshFeatures();
+    // Select + enter edit on the new sketch via the standard sketch-creation
+    // flow (also sets selectedFeatureId, activeFeatureId, editingSketchId).
+    await enterSketchEdit(id);
+    await unifiedViewport.value?.refreshViewport();
+    toastStore.success("偏移平面已创建");
+  } catch (err) {
+    toastStore.error(`偏移平面创建失败: ${err}`);
+  }
+}
+
+// ── Toolbar action dispatchers ───────────────────────────────────
+
+function onFileAction(action: FileAction) {
+  switch (action) {
+    case "new": clearDoc(); break;
+    case "open": loadProjectFile(); break;
+    case "save":
+    case "save-as": saveProjectFile(); break;
+    case "export-stl": exportStlFile(); break;
+    case "export-obj": exportObjFile(); break;
+    case "export-gltf": exportGltfFile(); break;
+  }
+}
+
+function onFeatureAction(kind: FeatureKind) {
+  switch (kind) {
+    case "extrude": showExtrudePanel(); break;
+    case "revolve": revolve(); break;
+    case "sweep": addSweep(); break;
+    case "fillet": addFillet(); break;
+    case "chamfer": addChamfer(); break;
+    case "shell": addShell(); break;
+    case "boolean": addBoolean(); break;
+  }
+}
+
+function onPatternAction(kind: PatternKind) {
+  switch (kind) {
+    case "linear": addLinearPattern(); break;
+    case "circular": addCircularPattern(); break;
+    case "mirror": addMirror(); break;
+  }
+}
+
+function onConstraintAction(kind: ConstraintKind) {
+  switch (kind) {
+    case "horizontal": addHorizontal(); break;
+    case "vertical": addVertical(); break;
+    case "parallel": addParallel(); break;
+    case "perpendicular": addPerpendicular(); break;
+    case "tangent": addTangent(); break;
+    case "concentric": addConcentric(); break;
+    case "equal": addEqual(); break;
+    case "midpoint": addMidpoint(); break;
+    case "fix": addFixPoint(); break;
+    case "angle": addAngle(); break;
+    case "diameter": addDiameter(); break;
+    case "distance": addDistance(); break;
+    case "solve": solve(); break;
+  }
 }
 
 // ── File operations ──────────────────────────────────────────────
@@ -886,55 +717,65 @@ async function addBoolean() {
 async function saveProjectFile() {
   try {
     const path = await saveProject();
-    showToast("success", `已保存: ${basename(path)}`);
+    toastStore.success(`已保存: ${basename(path)}`);
     await refreshRecent();
   } catch (err) {
     if (String(err).includes("No file selected")) return;
-    showToast("error", `保存失败: ${err}`);
+    toastStore.error(`保存失败: ${err}`);
   }
 }
 
 async function loadProjectFile() {
   try {
     await loadProject();
-    selectedFeatureId.value = null;
+    sketchStore.selectedFeatureId = null;
     const features = await getFeatures();
     const firstSketch = features.find(f => f.feature_type === "Sketch" || f.feature_type.startsWith("Custom:"));
     if (firstSketch) sketchStore.setActiveFeature(firstSketch.id);
     await loadState();
     await unifiedViewport.value?.refreshViewport();
     await refreshRecent();
-    showToast("success", "项目已加载");
+    toastStore.success("项目已加载");
   } catch (err) {
     // Don't error if user just cancelled the file picker
     if (String(err).includes("No file selected")) return;
-    showToast("error", `加载失败: ${err}`);
+    toastStore.error(`加载失败: ${err}`);
   }
 }
 
 async function exportStlFile() {
   try {
     const path = await exportStl();
-    showToast("success", `已导出 STL: ${path}`);
+    toastStore.success(`已导出 STL: ${path}`);
   } catch (err) {
     if (String(err).includes("No file selected")) return;
-    showToast("error", `STL 导出失败: ${err}`);
+    toastStore.error(`STL 导出失败: ${err}`);
   }
 }
 
 async function exportObjFile() {
   try {
     const path = await exportObj();
-    showToast("success", `已导出 OBJ: ${path}`);
+    toastStore.success(`已导出 OBJ: ${path}`);
   } catch (err) {
     if (String(err).includes("No file selected")) return;
-    showToast("error", `OBJ 导出失败: ${err}`);
+    toastStore.error(`OBJ 导出失败: ${err}`);
+  }
+}
+
+async function exportGltfFile() {
+  try {
+    const path = await exportGltf();
+    toastStore.success(`已导出 glTF: ${path}`);
+  } catch (err) {
+    if (String(err).includes("No file selected")) return;
+    toastStore.error(`glTF 导出失败: ${err}`);
   }
 }
 
 async function undoAction() {
   if (await undo()) {
-    selectedFeatureId.value = null;
+    sketchStore.selectedFeatureId = null;
     await loadState();
     await unifiedViewport.value?.refreshViewport();
   }
@@ -942,7 +783,7 @@ async function undoAction() {
 
 async function redoAction() {
   if (await redo()) {
-    selectedFeatureId.value = null;
+    sketchStore.selectedFeatureId = null;
     await loadState();
     await unifiedViewport.value?.refreshViewport();
   }
@@ -1006,113 +847,228 @@ function pickPointAndLine(): [EntityId, EntityId] | null {
 async function addHorizontal() {
   const id = sketchStore.selectedId;
   if (id === null) {
-    showToast("info", "请先选择一条线");
+    toastStore.info("请先选择一条线");
     return;
   }
-  await addConstraint({ Horizontal: { line: id } });
-  await solveSketch();
-  await refreshSketch();
+  try {
+    await addConstraint({ Horizontal: { line: id } });
+    await solveSketch();
+    await refreshSketch();
+    await loadState();
+    await unifiedViewport.value?.refreshViewport();
+  } catch (err) {
+    toastStore.error(`水平约束添加失败: ${err}`);
+  }
 }
 
 async function addVertical() {
   const id = sketchStore.selectedId;
   if (id === null) {
-    showToast("info", "请先选择一条线");
+    toastStore.info("请先选择一条线");
     return;
   }
-  await addConstraint({ Vertical: { line: id } });
-  await solveSketch();
-  await refreshSketch();
+  try {
+    await addConstraint({ Vertical: { line: id } });
+    await solveSketch();
+    await refreshSketch();
+    await loadState();
+    await unifiedViewport.value?.refreshViewport();
+  } catch (err) {
+    toastStore.error(`垂直约束添加失败: ${err}`);
+  }
 }
 
 async function addParallel() {
   const ids = pickTwoLines();
-  if (!ids) { showToast("info", "需要两条线"); return; }
-  await addConstraint({ Parallel: { line_a: ids[0], line_b: ids[1] } });
-  await solveSketch(); await refreshSketch();
+  if (!ids) { toastStore.info("需要两条线"); return; }
+  try {
+    await addConstraint({ Parallel: { line_a: ids[0], line_b: ids[1] } });
+    await solveSketch();
+    await refreshSketch();
+    await loadState();
+    await unifiedViewport.value?.refreshViewport();
+  } catch (err) {
+    toastStore.error(`平行约束添加失败: ${err}`);
+  }
 }
 
 async function addPerpendicular() {
   const ids = pickTwoLines();
-  if (!ids) { showToast("info", "需要两条线"); return; }
-  await addConstraint({ Perpendicular: { line_a: ids[0], line_b: ids[1] } });
-  await solveSketch(); await refreshSketch();
+  if (!ids) { toastStore.info("需要两条线"); return; }
+  try {
+    await addConstraint({ Perpendicular: { line_a: ids[0], line_b: ids[1] } });
+    await solveSketch();
+    await refreshSketch();
+    await loadState();
+    await unifiedViewport.value?.refreshViewport();
+  } catch (err) {
+    toastStore.error(`正交约束添加失败: ${err}`);
+  }
 }
 
 async function addTangent() {
   const ids = pickLineAndCircle();
-  if (!ids) { showToast("info", "需要一条线和一个圆/弧"); return; }
-  await addConstraint({ Tangent: { line: ids[0], circle: ids[1] } });
-  await solveSketch(); await refreshSketch();
+  if (!ids) { toastStore.info("需要一条线和一个圆/弧"); return; }
+  try {
+    await addConstraint({ Tangent: { line: ids[0], circle: ids[1] } });
+    await solveSketch();
+    await refreshSketch();
+    await loadState();
+    await unifiedViewport.value?.refreshViewport();
+  } catch (err) {
+    toastStore.error(`相切约束添加失败: ${err}`);
+  }
 }
 
 async function addConcentric() {
   const ids = pickTwoCircles();
-  if (!ids) { showToast("info", "需要两个圆/弧"); return; }
-  await addConstraint({ Concentric: { a: ids[0], b: ids[1] } });
-  await solveSketch(); await refreshSketch();
+  if (!ids) { toastStore.info("需要两个圆/弧"); return; }
+  try {
+    await addConstraint({ Concentric: { a: ids[0], b: ids[1] } });
+    await solveSketch();
+    await refreshSketch();
+    await loadState();
+    await unifiedViewport.value?.refreshViewport();
+  } catch (err) {
+    toastStore.error(`同心约束添加失败: ${err}`);
+  }
 }
 
 async function addEqual() {
   const ids = pickTwoLines() ?? pickTwoCircles();
-  if (!ids) { showToast("info", "需要两个同类实体"); return; }
-  await addConstraint({ Equal: { a: ids[0], b: ids[1] } });
-  await solveSketch(); await refreshSketch();
+  if (!ids) { toastStore.info("需要两个同类实体"); return; }
+  try {
+    await addConstraint({ Equal: { a: ids[0], b: ids[1] } });
+    await solveSketch();
+    await refreshSketch();
+    await loadState();
+    await unifiedViewport.value?.refreshViewport();
+  } catch (err) {
+    toastStore.error(`等长约束添加失败: ${err}`);
+  }
 }
 
 async function addMidpoint() {
   const ids = pickPointAndLine();
-  if (!ids) { showToast("info", "需要一个点 + 一条线"); return; }
-  await addConstraint({ Midpoint: { point: ids[0], line: ids[1] } });
-  await solveSketch(); await refreshSketch();
+  if (!ids) { toastStore.info("需要一个点 + 一条线"); return; }
+  try {
+    await addConstraint({ Midpoint: { point: ids[0], line: ids[1] } });
+    await solveSketch();
+    await refreshSketch();
+    await loadState();
+    await unifiedViewport.value?.refreshViewport();
+  } catch (err) {
+    toastStore.error(`中点约束添加失败: ${err}`);
+  }
 }
 
 async function addFixPoint() {
   const id = sketchStore.selectedId;
   if (id === null) {
-    showToast("info", "请先选择一个点");
+    toastStore.info("请先选择一个点");
     return;
   }
-  await addConstraint({ Fix: { point: id } });
-  await refreshSketch();
+  try {
+    await addConstraint({ Fix: { point: id } });
+    await solveSketch();
+    await refreshSketch();
+    await loadState();
+    await unifiedViewport.value?.refreshViewport();
+  } catch (err) {
+    toastStore.error(`固定约束添加失败: ${err}`);
+  }
 }
 
 async function addAngle() {
   const ids = pickTwoLines();
-  if (!ids) { showToast("info", "需要两条线"); return; }
-  await addConstraint({ Angle: { line_a: ids[0], line_b: ids[1], angle_deg: 90.0 } });
-  await solveSketch(); await refreshSketch();
+  if (!ids) { toastStore.info("需要两条线"); return; }
+  try {
+    await addConstraint({ Angle: { line_a: ids[0], line_b: ids[1], angle_deg: 90.0 } });
+    await solveSketch();
+    await refreshSketch();
+    await loadState();
+    await unifiedViewport.value?.refreshViewport();
+  } catch (err) {
+    toastStore.error(`角度约束添加失败: ${err}`);
+  }
 }
 
 async function addDiameter() {
   const circles = sketchStore.entities.filter(e => e.type === "Circle" || e.type === "Arc");
-  if (circles.length === 0) { showToast("info", "需要圆/弧"); return; }
+  if (circles.length === 0) { toastStore.info("需要圆/弧"); return; }
   const sel = sketchStore.selectedId;
   const target = (sel !== null && circles.some(c => c.id === sel))
     ? circles.find(c => c.id === sel)!
     : circles[0];
   const r = target.type === "Circle" ? target.radius : (target as any).radius;
-  await addConstraint({ Diameter: { circle: target.id, diameter: r * 2 } });
-  await solveSketch(); await refreshSketch();
+  try {
+    await addConstraint({ Diameter: { circle: target.id, diameter: r * 2 } });
+    await solveSketch();
+    await refreshSketch();
+    await loadState();
+    await unifiedViewport.value?.refreshViewport();
+  } catch (err) {
+    toastStore.error(`直径约束添加失败: ${err}`);
+  }
 }
 
 async function addDistance() {
   const ids = pickTwoPoints();
-  if (!ids) { showToast("info", "需要两个点"); return; }
-  await addConstraint({ Distance: { a: ids[0], b: ids[1], distance: 2.0 } });
-  await solveSketch(); await refreshSketch();
+  if (!ids) { toastStore.info("需要两个点"); return; }
+  try {
+    await addConstraint({ Distance: { a: ids[0], b: ids[1], distance: 2.0 } });
+    await solveSketch();
+    await refreshSketch();
+    await loadState();
+    await unifiedViewport.value?.refreshViewport();
+  } catch (err) {
+    toastStore.error(`距离约束添加失败: ${err}`);
+  }
 }
 
 async function solve() {
   await solveSketch();
   await refreshSketch();
+  await loadState();
+  await unifiedViewport.value?.refreshViewport();
+}
+
+/// Delete a single constraint by its index in store.constraints. The
+/// `removeConstraint` Tauri command takes an index (not an id) — the
+/// PropertiesPanel passes the index from its v-for, which matches the
+/// backend's current constraint ordering. After the deletion we re-sync
+/// the store (read-your-write, design-principle #6.1) so the list and
+/// the dimension/glyph overlay both update.
+async function deleteConstraint(index: number) {
+  try {
+    await removeConstraint(index);
+    await refreshSketch();
+    await loadState();
+    await unifiedViewport.value?.refreshViewport();
+  } catch (err) {
+    toastStore.error(`约束删除失败: ${err}`);
+  }
+}
+
+/// Clear every constraint on the active sketch. Repeatedly remove index 0
+/// (each removal shifts later indices down) until none remain. A single
+/// refreshSketch at the end is enough since the backend mutation is
+/// synchronous w.r.t. our await chain.
+async function clearAllConstraints() {
+  const n = sketchStore.constraints.length;
+  try {
+    for (let i = 0; i < n; i++) {
+      await removeConstraint(0);
+    }
+    await refreshSketch();
+    await loadState();
+    await unifiedViewport.value?.refreshViewport();
+  } catch (err) {
+    toastStore.error(`约束清除失败: ${err}`);
+  }
 }
 
 // ── Entity editing ───────────────────────────────────────────────
-
-function lineLength(line: { x1: number; y1: number; x2: number; y2: number }): number {
-  return Math.sqrt((line.x2 - line.x1) ** 2 + (line.y2 - line.y1) ** 2);
-}
 
 async function updateEntityProp(id: EntityId, prop: string, event: Event) {
   const value = parseFloat((event.target as HTMLInputElement).value);
@@ -1120,6 +1076,8 @@ async function updateEntityProp(id: EntityId, prop: string, event: Event) {
   await updateEntityPropCmd(id, prop, value);
   await solveSketch();
   await refreshSketch();
+  await loadState();
+  await unifiedViewport.value?.refreshViewport();
 }
 
 async function deleteSelectedEntity() {
@@ -1128,17 +1086,21 @@ async function deleteSelectedEntity() {
   await deleteEntityCmd(id);
   sketchStore.select(null);
   await refreshSketch();
+  await loadState();
+  await unifiedViewport.value?.refreshViewport();
 }
 
 async function toggleConstruction(id: EntityId, event: Event) {
   const checked = (event.target as HTMLInputElement).checked;
   await updateEntityPropCmd(id, "construction", checked ? 1 : 0);
   await refreshSketch();
+  await loadState();
+  await unifiedViewport.value?.refreshViewport();
 }
 
 // ── Context menu ─────────────────────────────────────────────────
 
-const ctxMenu = ref<{ x: number; y: number; featureId: FeatureId } | null>(null);
+const ctxMenu = ref<CtxTarget | null>(null);
 function onFeatureContextMenu(event: MouseEvent, featureId: FeatureId) {
   event.preventDefault();
   ctxMenu.value = { x: event.clientX, y: event.clientY, featureId };
@@ -1155,8 +1117,13 @@ async function ctxRename() {
   if (!f) return;
   const n = prompt("重命名:", f.name);
   if (n && n !== f.name) {
-    await renameFeatureCmd(f.id, n);
-    await loadState();
+    try {
+      await renameFeatureCmd(f.id, n);
+      await loadState();
+      await unifiedViewport.value?.refreshViewport();
+    } catch (err) {
+      toastStore.error(`重命名失败: ${err}`);
+    }
   }
   closeCtxMenu();
 }
@@ -1195,26 +1162,23 @@ function ctxFaceNormal() {
 async function exitSketchEdit() {
   if (sketchStore.editingSketchId === null) return;
   sketchStore.setEditingSketch(null);
-  closeAllMenus();
+  toolbarRef.value?.closeAllMenus();
   await unifiedViewport.value?.refreshViewport();
 }
 
 function onGlobalClick() {
-  closeAllMenus();
+  toolbarRef.value?.closeAllMenus();
   closeCtxMenu();
 }
 
 // ── Plugin dialog ────────────────────────────────────────────────
 
 const activeDialog = ref<GeneratorInfo | null>(null);
-const dialogParams = ref<Record<string, number>>({});
 const dialogLoading = ref(false);
 
 function openPluginDialog(gen: GeneratorInfo) {
   sketchStore.setActivePluginTool(`${gen.plugin_id}:${gen.id}`);
   activeDialog.value = gen;
-  dialogParams.value = {};
-  for (const param of gen.parameters) dialogParams.value[param.id] = param.default_value;
 }
 
 function closeDialog() {
@@ -1223,20 +1187,20 @@ function closeDialog() {
   dialogLoading.value = false;
 }
 
-async function runGenerator() {
+async function runGenerator(params: Record<string, number>) {
   const gen = activeDialog.value;
   if (!gen || dialogLoading.value) return;
   dialogLoading.value = true;
   try {
-    const id = await generatePluginFeature(gen.plugin_id, gen.id, { ...dialogParams.value });
+    const id = await generatePluginFeature(gen.plugin_id, gen.id, { ...params });
     closeDialog();
     sketchStore.setActiveFeature(id);
     await loadState();
     await unifiedViewport.value?.refreshViewport();
-    selectedFeatureId.value = id;
-    showToast("success", `${gen.name} 生成成功`);
+    sketchStore.selectedFeatureId = id;
+    toastStore.success(`${gen.name} 生成成功`);
   } catch (e) {
-    showToast("error", `${gen.name} 生成失败: ${e}`);
+    toastStore.error(`${gen.name} 生成失败: ${e}`);
   } finally {
     dialogLoading.value = false;
   }
@@ -1292,13 +1256,32 @@ onMounted(async () => {
   await refreshRecent();
   layoutRoot.value?.focus();
   document.addEventListener("click", onGlobalClick);
+
+  // Check for crash recovery file
+  try {
+    const hasRecovery = await checkRecovery();
+    if (hasRecovery) {
+      toastStore.info("检测到未保存的工作，使用 Ctrl+O 恢复");
+    }
+  } catch {
+    // Ignore recovery check errors
+  }
 });
 onUnmounted(() => {
   document.removeEventListener("click", onGlobalClick);
 });
 </script>
 
-<style scoped>
+<style>
+/*
+ * These styles are intentionally NON-scoped: the markup for the toolbar,
+ * feature tree, properties panel, dialogs, toasts and context menu now
+ * lives in dedicated child components, but they all reuse the class names
+ * defined here. Keeping the rules global (rather than scoped to HomeView)
+ * lets them reach into those children without duplication. Specificity is
+ * never higher than a single class, so any child that ships its own scoped
+ * override (e.g. ExtrudePanel's .btn-primary) still wins.
+ */
 .main-layout {
   display: flex; flex-direction: column; width: 100%; height: 100%;
   background: #1e1e1e; color: #e0e0e0; outline: none;

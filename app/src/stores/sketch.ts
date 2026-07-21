@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref } from "vue";
+import { ref, computed } from "vue";
 import type {
   Constraint,
   EntityId,
@@ -24,6 +24,11 @@ export const useSketchStore = defineStore("sketch", () => {
   const constraints = ref<Constraint[]>([]);
   const features = ref<FeatureNode[]>([]);
 
+  /// Per-feature color overrides keyed by FeatureId → hex color string.
+  /// If a feature has no entry here, the renderer falls back to the default
+  /// SOLID_COLORS palette. Currently UI-only (no backend command yet).
+  const featureColors = ref<Record<number, string>>({});
+
   /// The "active" feature — what feature operations (extrude, revolve, ...)
   /// will target. Set on every tree selection. For sketches, this is also
   /// the sketch that would be extruded.
@@ -34,6 +39,21 @@ export const useSketchStore = defineStore("sketch", () => {
   /// `activeFeatureId` so that left-clicking a sketch in the tree merely
   /// selects it without entering edit mode (SolidWorks behavior).
   const editingSketchId = ref<FeatureId | null>(null);
+
+  /// The feature currently *selected* in the tree (single left-click) —
+  /// drives the properties panel. This is a THIRD orthogonal state, kept
+  /// distinct from `activeFeatureId` and `editingSketchId` per the
+  /// selection≠editing rule (design-principle #2.1): selecting a feature
+  /// only shows its properties; it does not start an edit session.
+  const selectedFeatureId = ref<FeatureId | null>(null);
+
+  /// Derived view of the currently selected feature. Always reflects the
+  /// latest `features` list (design-principle #1/#4): we cache the ID, not
+  /// the object, so a `loadState()` refresh can never hand us a stale node.
+  const selectedFeature = computed<FeatureNode | null>(() => {
+    if (selectedFeatureId.value === null) return null;
+    return features.value.find(f => f.id === selectedFeatureId.value) ?? null;
+  });
 
   const activeTool = ref<Tool>("select");
   const selectedId = ref<EntityId | null>(null);
@@ -79,6 +99,11 @@ export const useSketchStore = defineStore("sketch", () => {
     // Clear editing state if the editing sketch was deleted.
     if (editingSketchId.value !== null && !data.some(f => f.id === editingSketchId.value)) {
       editingSketchId.value = null;
+    }
+    // Clear selected feature if it was deleted (prevents ghost selection
+    // after cascade deletes, design-principle #4).
+    if (selectedFeatureId.value !== null && !data.some(f => f.id === selectedFeatureId.value)) {
+      selectedFeatureId.value = null;
     }
     const stillValid = data.some((f) => f.id === activeFeatureId.value);
     if (!stillValid) {
@@ -129,16 +154,21 @@ export const useSketchStore = defineStore("sketch", () => {
     }
   }
 
-  function idsEqual(a: EntityId, b: EntityId): boolean {
-    return a === b;
+  /// Set a per-feature color override. The color is a hex string (e.g. "#ff8800").
+  /// Currently UI-only — no backend command persists it yet.
+  function setFeatureColor(featureId: number, hex: string) {
+    featureColors.value = { ...featureColors.value, [featureId]: hex };
   }
 
   return {
     entities,
     constraints,
     features,
+    featureColors,
     activeFeatureId,
     editingSketchId,
+    selectedFeatureId,
+    selectedFeature,
     activeTool,
     selectedId,
     isLoading,
@@ -159,7 +189,7 @@ export const useSketchStore = defineStore("sketch", () => {
     setPlugins,
     setGenerators,
     setActivePluginTool,
+    setFeatureColor,
     isEditingSketch,
-    idsEqual,
   };
 });

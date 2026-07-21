@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 echi-core = { path = "../echi-core" }
+echi-geom = { path = "../echi-geom" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -660,8 +660,20 @@ pub fn extract_loops(sketch: &Sketch) -> Option<Vec<Vec<Point2D>>> {
     }
 
     // Collect all non-construction curve entities with their endpoints.
+    // Iterate in deterministic (ascending EntityId) order: `sketch.entities`
+    // is a HashMap whose iteration order is randomized per-process by the
+    // SipHash seed. That randomness propagates into `edges` ordering, which
+    // picks the loop-walk start point and traversal order — making loop
+    // extraction (and therefore triangulation) nondeterministic across runs.
+    // Sorting by EntityId makes extraction reproducible.
+    let mut entity_ids: Vec<EntityId> = sketch.entities.keys().copied().collect();
+    entity_ids.sort_unstable_by_key(|e| e.0);
     let mut edges: Vec<EdgeRef> = Vec::new();
-    for (&id, entity) in &sketch.entities {
+    for id in entity_ids {
+        let entity = match sketch.entities.get(&id) {
+            Some(e) => e,
+            None => continue,
+        };
         match entity {
             SketchEntity::Line { start, end, construction } if !*construction => {
                 edges.push(EdgeRef { entity_id: id, a: *start, b: *end, kind: EdgeKind::Line });

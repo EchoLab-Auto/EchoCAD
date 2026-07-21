@@ -10,7 +10,6 @@ export interface ThreeContext {
   raycaster: THREE.Raycaster;
   sketchGroup: THREE.Group;
   previewGroup: THREE.Group;
-  dimensionGroup: THREE.Group;
   gridHelper: THREE.GridHelper;
 }
 
@@ -95,11 +94,8 @@ export function useThreeScene(): UseThreeSceneReturn {
     const previewGroup = new THREE.Group();
     previewGroup.name = "preview";
     scene.add(previewGroup);
-    const dimensionGroup = new THREE.Group();
-    dimensionGroup.name = "dimensions";
-    scene.add(dimensionGroup);
 
-    ctx.value = markRaw({ scene, camera, renderer, controls, raycaster, sketchGroup, previewGroup, dimensionGroup, gridHelper });
+    ctx.value = markRaw({ scene, camera, renderer, controls, raycaster, sketchGroup, previewGroup, gridHelper });
 
     resizeObserver = new ResizeObserver(() => {
       if (!container.value) return;
@@ -109,6 +105,8 @@ export function useThreeScene(): UseThreeSceneReturn {
         camera.aspect = w / h;
         camera.updateProjectionMatrix();
         renderer.setSize(w, h);
+        // Update pixel ratio when the window moves to a different-DPI monitor.
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       }
     });
     resizeObserver.observe(container.value);
@@ -172,9 +170,40 @@ export function useThreeScene(): UseThreeSceneReturn {
     if (animationId !== null) cancelAnimationFrame(animationId);
     if (ctx.value) {
       ctx.value.controls.dispose();
+      // Recursively dispose geometries, materials, and textures on every
+      // object in the scene so that GPU resources are released.
+      ctx.value.scene.traverse((obj) => {
+        if (obj instanceof THREE.Mesh || obj instanceof THREE.Line || obj instanceof THREE.LineSegments || obj instanceof THREE.Points) {
+          obj.geometry?.dispose();
+          const mat = obj.material;
+          if (mat) {
+            if (Array.isArray(mat)) {
+              for (const m of mat) disposeMaterial(m);
+            } else {
+              disposeMaterial(mat);
+            }
+          }
+        }
+      });
+      // Remove the renderer's canvas from the DOM so it does not leak.
+      const canvas = ctx.value.renderer.domElement;
+      if (canvas.parentElement) {
+        canvas.parentElement.removeChild(canvas);
+      }
       ctx.value.renderer.dispose();
     }
     ctx.value = null;
+  }
+
+  function disposeMaterial(mat: THREE.Material) {
+    // Dispose textures referenced by the material before disposing the material.
+    for (const key of Object.keys(mat)) {
+      const v = (mat as any)[key];
+      if (v && v.isTexture) {
+        v.dispose();
+      }
+    }
+    mat.dispose();
   }
 
   return { container, ctx, wireframe, showEdges, initScene, setView, toggleWireframe, toggleEdges, fitView, worldToScreen, dispose, animate };

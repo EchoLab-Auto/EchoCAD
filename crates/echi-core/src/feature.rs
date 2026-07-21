@@ -131,6 +131,12 @@ pub struct Feature {
     /// next-most-recent valid input.
     #[serde(default)]
     pub suppressed: bool,
+    /// Optional per-feature color as a hex string (e.g. "#ff8800").
+    /// `None` means the renderer should use the default palette-based color.
+    /// Currently UI-only (not yet exposed via a Tauri command); the store
+    /// persists it for project serialization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
     /// Kind-specific data (sketch, extrude, fillet, ...).
     #[serde(flatten)]
     pub kind: FeatureKind,
@@ -174,11 +180,20 @@ pub enum FeatureKind {
     Fillet {
         target_id: FeatureId,
         radius: ParameterId,
+        /// Specific edges to fillet, as (vertex_a, vertex_b) index pairs into
+        /// the target mesh. An empty vec means "all sharp edges" (the legacy
+        /// behaviour before per-edge selection existed).
+        #[serde(default)]
+        edges: Vec<(u32, u32)>,
     },
     /// Bevel edges at a 45° angle.
     Chamfer {
         target_id: FeatureId,
         distance: ParameterId,
+        /// Specific edges to chamfer, as (vertex_a, vertex_b) index pairs into
+        /// the target mesh. An empty vec means "all sharp edges".
+        #[serde(default)]
+        edges: Vec<(u32, u32)>,
     },
     /// Linear pattern: repeat a solid along a direction.
     LinearPattern {
@@ -241,7 +256,7 @@ pub enum BoolOp {
 
 impl Feature {
     pub fn new(id: FeatureId, name: impl Into<String>, kind: FeatureKind) -> Self {
-        Self { id, name: name.into(), suppressed: false, kind }
+        Self { id, name: name.into(), suppressed: false, color: None, kind }
     }
 
     pub fn id(&self) -> FeatureId {
@@ -328,7 +343,13 @@ impl Feature {
         match &self.kind {
             FeatureKind::Extrude { sketch_id, .. } => vec![*sketch_id],
             FeatureKind::Revolve { sketch_id, .. } => vec![*sketch_id],
-            FeatureKind::CustomSolid { sketch_id, .. } => vec![*sketch_id],
+            // R1: CustomSolid no longer reads `sketch_id` during regeneration
+            // (the plugin generator produces the mesh directly from
+            // custom.params).  Listing it as a dependency causes a spurious
+            // "dependency not found" error when the sketch is deleted, even
+            // though CustomSolid never touches it.  The field stays on the
+            // variant for backward compatibility with old project files.
+            FeatureKind::CustomSolid { .. } => Vec::new(),
             FeatureKind::Fillet { target_id, .. }
             | FeatureKind::Chamfer { target_id, .. }
             | FeatureKind::Shell { target_id, .. }
@@ -340,6 +361,182 @@ impl Feature {
             }
             FeatureKind::Boolean { target_a, target_b, .. } => vec![*target_a, *target_b],
             FeatureKind::Sketch { .. } | FeatureKind::CustomSketch { .. } => Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fillet(target: FeatureId, radius: ParameterId, edges: Vec<(u32, u32)>) -> Feature {
+        Feature::new(FeatureId(2), "Fillet1", FeatureKind::Fillet {
+            target_id: target,
+            radius,
+            edges,
+        })
+    }
+
+    fn chamfer(target: FeatureId, distance: ParameterId, edges: Vec<(u32, u32)>) -> Feature {
+        Feature::new(FeatureId(3), "Chamfer1", FeatureKind::Chamfer {
+            target_id: target,
+            distance,
+            edges,
+        })
+    }
+
+    #[test]
+    fn fillet_dependencies_and_tag_with_edges() {
+        let f = fillet(FeatureId(7), ParameterId(1), vec![(0, 1), (2, 3)]);
+        // Dependencies ignore the edge list — only the target matters.
+        assert_eq!(f.dependencies(), vec![FeatureId(7)]);
+        assert_eq!(f.type_tag(), "Fillet");
+    }
+
+    #[test]
+    fn chamfer_dependencies_and_tag_with_edges() {
+        let f = chamfer(FeatureId(9), ParameterId(1), vec![(4, 5)]);
+        assert_eq!(f.dependencies(), vec![FeatureId(9)]);
+        assert_eq!(f.type_tag(), "Chamfer");
+    }
+
+    #[test]
+    fn fillet_empty_edges_means_all() {
+        // Empty edge list is the legacy "fillet all sharp edges" behaviour;
+        // it must still report a dependency on the target.
+        let f = fillet(FeatureId(1), ParameterId(1), Vec::new());
+        assert_eq!(f.dependencies(), vec![FeatureId(1)]);
+    }
+
+    #[test]
+    fn offset_plane_frame_translates_origin_along_normal() {
+        // XY plane offset by +2 along its normal (Z) lands at (0,0,2).
+        let plane = PlaneDefinition::Offset {
+            base: Box::new(PlaneDefinition::XY),
+            distance: 2.0,
+        };
+        let (origin, u, v, n) = plane.frame();
+        assert!((origin[0] - 0.0).abs() < 1e-12);
+        assert!((origin[1] - 0.0).abs() < 1e-12);
+        assert!((origin[2] - 2.0).abs() < 1e-12, "origin z should be 2, got {}", origin[2]);
+        // Frame axes are unchanged from the base plane (offset is purely a translation).
+        assert_eq!(u, [1.0, 0.0, 0.0]);
+        assert_eq!(v, [0.0, 1.0, 0.0]);
+        assert_eq!(n, [0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn offset_plane_negative_distance_moves_opposite() {
+        let plane = PlaneDefinition::Offset {
+            base: Box::new(PlaneDefinition::YZ),
+            distance: -1.5,
+        };
+        let (origin, _, _, n) = plane.frame();
+        // YZ plane has normal +X; negative offset moves to x = -1.5.
+        assert!((origin[0] - (-1.5)).abs() < 1e-12, "origin x should be -1.5, got {}", origin[0]);
+        assert_eq!(n, [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn offset_plane_nested_offsets_stack() {
+        // Offset-of-offset should stack translations along the same normal.
+        let plane = PlaneDefinition::Offset {
+            base: Box::new(PlaneDefinition::Offset {
+                base: Box::new(PlaneDefinition::XY),
+                distance: 1.0,
+            }),
+            distance: 3.0,
+        };
+        let (origin, _, _, _) = plane.frame();
+        assert!((origin[2] - 4.0).abs() < 1e-12, "stacked offset z should be 4, got {}", origin[2]);
+    }
+
+    #[test]
+    fn fillet_with_edges_round_trips_serde() {
+        // Old project files have no `edges` field; serde(default) must keep
+        // them loading as the "all edges" empty vec.
+        let json = r#"{"type":"fillet","target_id":5,"radius":9}"#;
+        let parsed: Result<FeatureKind, _> = serde_json::from_str(json);
+        let kind = parsed.expect("legacy fillet without edges must deserialize");
+        match kind {
+            FeatureKind::Fillet { target_id, radius, edges } => {
+                assert_eq!(target_id, FeatureId(5));
+                assert_eq!(radius, ParameterId(9));
+                assert!(edges.is_empty(), "missing edges field must default to empty");
+            }
+            other => panic!("expected Fillet, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fillet_with_edges_serde_roundtrip() {
+        let kind = FeatureKind::Fillet {
+            target_id: FeatureId(10),
+            radius: ParameterId(2),
+            edges: vec![(0, 1), (2, 3)],
+        };
+        let json = serde_json::to_string(&kind).expect("should serialize");
+        let back: FeatureKind = serde_json::from_str(&json).expect("should deserialize");
+        match back {
+            FeatureKind::Fillet { target_id, radius, edges } => {
+                assert_eq!(target_id, FeatureId(10));
+                assert_eq!(radius, ParameterId(2));
+                assert_eq!(edges, vec![(0, 1), (2, 3)]);
+            }
+            other => panic!("expected Fillet, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fillet_empty_edges_serde_roundtrip() {
+        let kind = FeatureKind::Fillet {
+            target_id: FeatureId(1),
+            radius: ParameterId(3),
+            edges: Vec::new(),
+        };
+        let json = serde_json::to_string(&kind).expect("should serialize");
+        let back: FeatureKind = serde_json::from_str(&json).expect("should deserialize");
+        match back {
+            FeatureKind::Fillet { edges, .. } => {
+                assert!(edges.is_empty(), "empty edges should round-trip as empty");
+            }
+            other => panic!("expected Fillet, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn chamfer_with_edges_serde_roundtrip() {
+        let kind = FeatureKind::Chamfer {
+            target_id: FeatureId(7),
+            distance: ParameterId(4),
+            edges: vec![(4, 5)],
+        };
+        let json = serde_json::to_string(&kind).expect("should serialize");
+        let back: FeatureKind = serde_json::from_str(&json).expect("should deserialize");
+        match back {
+            FeatureKind::Chamfer { target_id, distance, edges } => {
+                assert_eq!(target_id, FeatureId(7));
+                assert_eq!(distance, ParameterId(4));
+                assert_eq!(edges, vec![(4, 5)]);
+            }
+            other => panic!("expected Chamfer, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn offset_plane_definition_serde_roundtrip() {
+        let plane = PlaneDefinition::Offset {
+            base: Box::new(PlaneDefinition::XY),
+            distance: 1.5,
+        };
+        let json = serde_json::to_string(&plane).expect("should serialize");
+        let back: PlaneDefinition = serde_json::from_str(&json).expect("should deserialize");
+        match back {
+            PlaneDefinition::Offset { base, distance } => {
+                assert!((distance - 1.5).abs() < 1e-12);
+                assert_eq!(*base, PlaneDefinition::XY);
+            }
+            other => panic!("expected Offset, got {:?}", other),
         }
     }
 }

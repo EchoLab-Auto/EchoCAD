@@ -413,3 +413,123 @@ fn extract_closed_profile(sketch: &Sketch) -> Option<Vec<(f64, f64)>> {
 
     Some(points)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use echi_core::sketch::Sketch;
+
+    fn make_square_profile() -> Sketch {
+        let mut sketch = Sketch::new();
+        let p0 = sketch.add_point(0.0, 0.0);
+        let p1 = sketch.add_point(1.0, 0.0);
+        let p2 = sketch.add_point(1.0, 1.0);
+        let p3 = sketch.add_point(0.0, 1.0);
+        sketch.add_line(p0, p1);
+        sketch.add_line(p1, p2);
+        sketch.add_line(p2, p3);
+        sketch.add_line(p3, p0);
+        sketch
+    }
+
+    fn make_straight_path() -> Sketch {
+        let mut sketch = Sketch::new();
+        let p0 = sketch.add_point(0.0, 0.0);
+        let p1 = sketch.add_point(5.0, 0.0);
+        sketch.add_line(p0, p1);
+        sketch
+    }
+
+    #[test]
+    fn sweep_square_along_line() {
+        let profile = make_square_profile();
+        let path = make_straight_path();
+        let mesh = sweep_mesh(&profile, &path).expect("should sweep square along line");
+        assert!(mesh.vertex_count() > 0);
+        assert!(!mesh.indices.is_empty());
+        let vcount = mesh.vertex_count() as u32;
+        for &idx in &mesh.indices {
+            assert!(idx < vcount, "index {} out of bounds (vertex_count {})", idx, vcount);
+        }
+    }
+
+    #[test]
+    fn sweep_triangle_profile() {
+        let mut profile = Sketch::new();
+        let p0 = profile.add_point(0.0, 0.0);
+        let p1 = profile.add_point(1.0, 0.0);
+        let p2 = profile.add_point(0.5, 1.0);
+        profile.add_line(p0, p1);
+        profile.add_line(p1, p2);
+        profile.add_line(p2, p0);
+
+        let mut path = Sketch::new();
+        let a = path.add_point(0.0, 0.0);
+        let b = path.add_point(0.0, 3.0);
+        path.add_line(a, b);
+
+        let mesh = sweep_mesh(&profile, &path).expect("should sweep triangle");
+        assert!(mesh.vertex_count() > 0);
+        assert!(!mesh.indices.is_empty());
+    }
+
+    #[test]
+    fn sweep_empty_profile_returns_none() {
+        let profile = Sketch::new();
+        let path = make_straight_path();
+        assert!(sweep_mesh(&profile, &path).is_none());
+    }
+
+    #[test]
+    fn sweep_empty_path_returns_none() {
+        let profile = make_square_profile();
+        let path = Sketch::new();
+        assert!(sweep_mesh(&profile, &path).is_none());
+    }
+
+    #[test]
+    fn sweep_single_point_path_returns_none() {
+        let profile = make_square_profile();
+        let mut path = Sketch::new();
+        path.add_point(0.0, 0.0);
+        assert!(sweep_mesh(&profile, &path).is_none());
+    }
+
+    #[test]
+    fn sweep_no_nan_invariant() {
+        let profile = make_square_profile();
+        let path = make_straight_path();
+        let mesh = sweep_mesh(&profile, &path).expect("should produce mesh");
+        assert!(mesh.vertex_count() > 0);
+        assert!(!mesh.indices.is_empty());
+        for &v in &mesh.positions {
+            assert!(!v.is_nan(), "NaN in positions");
+        }
+        for &n in &mesh.normals {
+            assert!(!n.is_nan(), "NaN in normals");
+        }
+        let vc = mesh.vertex_count() as u32;
+        for &idx in &mesh.indices {
+            assert!(idx < vc, "index {} out of bounds", idx);
+        }
+    }
+
+    #[test]
+    fn sweep_curved_path() {
+        let profile = make_square_profile();
+        let mut path = Sketch::new();
+        let a = path.add_point(0.0, 0.0);
+        let b = path.add_point(3.0, 2.0);
+        let c = path.add_point(6.0, 0.0);
+        path.add_line(a, b);
+        path.add_line(b, c);
+
+        let mesh = sweep_mesh(&profile, &path).expect("should sweep along multi-segment path");
+        assert!(mesh.vertex_count() > 0);
+        assert!(!mesh.indices.is_empty());
+        let vc = mesh.vertex_count() as u32;
+        for &idx in &mesh.indices {
+            assert!(idx < vc, "index {} out of bounds", idx);
+        }
+    }
+}
