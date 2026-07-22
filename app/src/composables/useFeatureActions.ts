@@ -162,23 +162,52 @@ export function useFeatureActions(
   }
 
   async function addFillet() {
-    const tid = selectedSolidFeatureId();
+    const tid = selectedSolidFeatureId() ?? lastSolidFeatureId();
     if (tid === null) {
-      toastStore.info("请先点击一个实体面（或选中实体特征）");
+      toastStore.info("请先创建一个实体");
       return;
     }
-    const id = await withFeatureAction("圆角特征", () => addFilletEdgesFeature(tid, 0.5, []));
-    if (id !== null) sketchStore.selectedFeatureId = id;
+    sketchStore.enterEdgePickMode("fillet", tid);
   }
 
   async function addChamfer() {
-    const tid = selectedSolidFeatureId();
+    const tid = selectedSolidFeatureId() ?? lastSolidFeatureId();
     if (tid === null) {
-      toastStore.info("请先点击一个实体面（或选中实体特征）");
+      toastStore.info("请先创建一个实体");
       return;
     }
-    const id = await withFeatureAction("倒角特征", () => addChamferEdgesFeature(tid, 0.5, []));
-    if (id !== null) sketchStore.selectedFeatureId = id;
+    sketchStore.enterEdgePickMode("chamfer", tid);
+  }
+
+  /// Called when the user confirms edge-pick mode in the PropertiesPanel.
+  /// Creates the fillet/chamfer with the selected edges (or all edges if empty).
+  async function confirmEdgePick(radiusOrDistance: number) {
+    const targetId = sketchStore.pendingFilletChamferTarget;
+    const edgeType = sketchStore.pendingFilletChamferType;
+    if (targetId === null || edgeType === null) return;
+
+    const label = edgeType === "fillet" ? "圆角特征" : "倒角特征";
+    // Capture edges before exiting (exitEdgePickMode clears them).
+    const capturedEdges = [...sketchStore.pendingEdges];
+    sketchStore.exitEdgePickMode();
+
+    try {
+      if (edgeType === "fillet") {
+        await addFilletEdgesFeature(targetId, radiusOrDistance, capturedEdges);
+      } else {
+        await addChamferEdgesFeature(targetId, radiusOrDistance, capturedEdges);
+      }
+      await loadState();
+      await unifiedViewport.value?.refreshViewport();
+      toastStore.success(`${label}已创建`);
+    } catch (err) {
+      toastStore.error(`${label}失败: ${err}`);
+    }
+  }
+
+  /// User cancels edge-pick mode.
+  function cancelEdgePick() {
+    sketchStore.exitEdgePickMode();
   }
 
   async function addLinearPattern() {
@@ -303,6 +332,8 @@ export function useFeatureActions(
     revolve,
     addFillet,
     addChamfer,
+    confirmEdgePick,
+    cancelEdgePick,
     addShell,
     addLinearPattern,
     addCircularPattern,

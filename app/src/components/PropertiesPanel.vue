@@ -72,6 +72,66 @@
         <label></label>
         <span class="has-dep" title="其他特征依赖于此特征">⚠ 有依赖</span>
       </div>
+
+      <!-- Edge-pick section: shown for Fillet/Chamfer features (editing)
+           and during edge-pick creation mode for fillet/chamfer. -->
+      <div
+        v-if="isEdgePickFeature"
+        class="edge-pick-section"
+      >
+        <div class="edge-pick-header">边缘选择</div>
+
+        <!-- In creation mode: show selected edges + params + confirm/cancel -->
+        <template v-if="sketchStore.edgePickMode && sketchStore.pendingFilletChamferType">
+          <div v-if="sketchStore.pendingEdges.length === 0" class="edge-pick-empty">
+            点击视口中的边缘来选择（可选：留空则选择全部锐边）
+          </div>
+          <div v-else class="edge-list">
+            <div
+              v-for="(edge, i) in sketchStore.pendingEdges"
+              :key="i"
+              class="edge-item"
+            >
+              <span class="edge-label">边 ({{ edge[0] }}, {{ edge[1] }})</span>
+              <button
+                class="edge-remove-btn"
+                title="移除此边"
+                @click="sketchStore.removePickedEdge(i)"
+              >✕</button>
+            </div>
+          </div>
+
+          <!-- Radius / Distance parameter for the pending feature -->
+          <div class="prop-row edge-param-row">
+            <label>{{ sketchStore.pendingFilletChamferType === "fillet" ? "半径" : "距离" }}</label>
+            <input
+              type="number"
+              step="0.1"
+              min="0.1"
+              :value="edgeParamValue"
+              @input="edgeParamValue = parseFloat(($event.target as HTMLInputElement).value) || 0.5"
+              class="edge-param-input"
+            />
+          </div>
+
+          <div class="edge-pick-actions">
+            <button class="btn-confirm-edge" @click="emit('confirm-edge-pick', edgeParamValue)">
+              {{ sketchStore.pendingFilletChamferType === "fillet" ? "确认圆角" : "确认倒角" }}
+            </button>
+            <button class="btn-cancel-edge" @click="emit('exit-edge-pick')">取消</button>
+          </div>
+        </template>
+
+        <!-- Editing an existing Fillet/Chamfer: show edge count + re-pick button -->
+        <template v-else>
+          <div class="edge-pick-info">
+            <span v-if="selectedFeature">已选择全部锐边</span>
+          </div>
+          <button class="btn-pick-edges" @click="emit('enter-edge-pick')">
+            选择边 / Pick edges
+          </button>
+        </template>
+      </div>
     </div>
 
     <!-- Entity properties -->
@@ -143,7 +203,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { ref, computed } from "vue";
 import ExtrudePanel from "@/components/ExtrudePanel.vue";
 import { useSketchStore } from "@/stores/sketch";
 import type {
@@ -167,11 +227,27 @@ const emit = defineEmits<{
   (e: "extrude-change", config: ExtrudeConfig): void;
   (e: "extrude-confirm"): void;
   (e: "extrude-cancel"): void;
+  (e: "enter-edge-pick"): void;
+  (e: "exit-edge-pick"): void;
+  (e: "confirm-edge-pick", radius: number): void;
+  (e: "remove-picked-edge", index: number): void;
 }>();
 
 const sketchStore = useSketchStore();
 
 const selectedFeature = computed(() => sketchStore.selectedFeature);
+
+/// True when we should show the edge-pick section: either the selected
+/// feature is a Fillet/Chamfer, or we are in edge-pick creation mode.
+const isEdgePickFeature = computed(() => {
+  if (sketchStore.edgePickMode) return true;
+  const f = selectedFeature.value;
+  if (!f) return false;
+  return f.feature_type === "Fillet" || f.feature_type === "Chamfer";
+});
+
+/// Default radius/distance for the edge-pick creation UI.
+const edgeParamValue = ref(0.5);
 
 /// True when the selected feature is a solid-producing feature
 /// (anything that isn't a Sketch or CustomSketch). Color picker is
@@ -477,5 +553,116 @@ function formatParamValue(value: number): string {
 .color-reset-btn:hover {
   background: #444;
   color: #fff;
+}
+
+/* ── Edge-pick section ─────────────────────────────────────────── */
+.edge-pick-section {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #3c3c3c;
+}
+.edge-pick-header {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: #999;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+.edge-pick-empty {
+  font-size: 11px;
+  color: #777;
+  font-style: italic;
+  margin-bottom: 8px;
+}
+.edge-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 160px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+}
+.edge-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 6px;
+  border-radius: 2px;
+  font-size: 11px;
+  background: #2a2a2a;
+}
+.edge-label {
+  color: #4fc3f7;
+  font-family: monospace;
+}
+.edge-remove-btn {
+  background: transparent;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+  border-radius: 2px;
+  opacity: 0.6;
+}
+.edge-remove-btn:hover {
+  color: #ff6b6b;
+  background: #3a1a1a;
+  opacity: 1;
+}
+.edge-param-row {
+  margin: 8px 0;
+}
+.edge-param-input {
+  width: 80px !important;
+}
+.edge-pick-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.btn-confirm-edge {
+  background: #007acc;
+  border: none;
+  color: white;
+  padding: 5px 14px;
+  font-size: 12px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.btn-confirm-edge:hover {
+  background: #0098ff;
+}
+.btn-cancel-edge {
+  background: #3c3c3c;
+  border: 1px solid #555;
+  color: #ddd;
+  padding: 5px 14px;
+  font-size: 12px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.btn-cancel-edge:hover {
+  background: #555;
+}
+.btn-pick-edges {
+  margin-top: 6px;
+  padding: 4px 12px;
+  background: #3c3c3c;
+  border: 1px solid #4fc3f7;
+  color: #4fc3f7;
+  font-size: 11px;
+  border-radius: 2px;
+  cursor: pointer;
+}
+.btn-pick-edges:hover {
+  background: #007acc;
+  border-color: #007acc;
+  color: #fff;
+}
+.edge-pick-info {
+  font-size: 11px;
+  color: #888;
+  margin-bottom: 4px;
 }
 </style>

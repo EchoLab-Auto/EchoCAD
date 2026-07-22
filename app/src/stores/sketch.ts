@@ -30,6 +30,56 @@ export const useSketchStore = defineStore("sketch", () => {
   /// SOLID_COLORS palette. Currently UI-only (no backend command yet).
   const featureColors = ref<Record<number, string>>({});
 
+  // ── Measurement mode ─────────────────────────────────────────────
+  const measureMode = ref<boolean>(false);
+  const measurePoints = ref<{ x: number; y: number; z: number }[]>([]);
+
+  function toggleMeasure() {
+    measureMode.value = !measureMode.value;
+    measurePoints.value = [];
+  }
+
+  function clearMeasurePoints() {
+    measurePoints.value = [];
+  }
+
+  // ── Edge-pick mode (for fillet/chamfer) ──────────────────────────
+  /// true when the user is picking edges for a pending fillet/chamfer.
+  const edgePickMode = ref<boolean>(false);
+  /// Edges selected by the user, each stored as (vertexA, vertexB) index pair.
+  const pendingEdges = ref<[number, number][]>([]);
+  /// The solid feature that the fillet/chamfer will target.
+  const pendingFilletChamferTarget = ref<FeatureId | null>(null);
+  /// "fillet" or "chamfer".
+  const pendingFilletChamferType = ref<"fillet" | "chamfer" | null>(null);
+
+  function enterEdgePickMode(type: "fillet" | "chamfer", targetId: FeatureId) {
+    edgePickMode.value = true;
+    pendingEdges.value = [];
+    pendingFilletChamferType.value = type;
+    pendingFilletChamferTarget.value = targetId;
+  }
+
+  function exitEdgePickMode() {
+    edgePickMode.value = false;
+    pendingEdges.value = [];
+    pendingFilletChamferType.value = null;
+    pendingFilletChamferTarget.value = null;
+  }
+
+  function addPickedEdge(vA: number, vB: number) {
+    const exists = pendingEdges.value.some(
+      ([a, b]) => (a === vA && b === vB) || (a === vB && b === vA),
+    );
+    if (!exists) {
+      pendingEdges.value.push([vA, vB]);
+    }
+  }
+
+  function removePickedEdge(index: number) {
+    pendingEdges.value.splice(index, 1);
+  }
+
   /// The "active" feature — what feature operations (extrude, revolve, ...)
   /// will target. Set on every tree selection. For sketches, this is also
   /// the sketch that would be extruded.
@@ -210,5 +260,19 @@ export const useSketchStore = defineStore("sketch", () => {
     setFeatureColor,
     persistFeatureColor,
     isEditingSketch,
+    // Measurement
+    measureMode,
+    measurePoints,
+    toggleMeasure,
+    clearMeasurePoints,
+    // Edge pick
+    edgePickMode,
+    pendingEdges,
+    pendingFilletChamferTarget,
+    pendingFilletChamferType,
+    enterEdgePickMode,
+    exitEdgePickMode,
+    addPickedEdge,
+    removePickedEdge,
   };
 });

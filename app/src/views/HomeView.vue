@@ -17,6 +17,7 @@
       @open-plugin="openPluginDialog"
       @offset-plane="openOffsetDialog"
       @clear-sketch="clearSketchAction"
+      @toggle-measure="toggleMeasure"
     />
 
     <div class="workspace">
@@ -48,7 +49,7 @@
 
       <!-- Main viewport -->
       <main class="viewport">
-        <UnifiedViewport ref="unifiedViewport" @faceSelected="onFaceSelected" @drag-end="onDragEnd" />
+        <UnifiedViewport ref="unifiedViewport" @faceSelected="onFaceSelected" @drag-end="onDragEnd" @edgeSelected="onEdgeSelected" />
       </main>
 
       <!-- Right sidebar: Properties -->
@@ -64,6 +65,9 @@
           @extrude-change="onExtrudeConfigChange"
           @extrude-confirm="doExtrude"
           @extrude-cancel="cancelExtrude"
+          @enter-edge-pick="onEnterEdgePick"
+          @exit-edge-pick="cancelEdgePick"
+          @confirm-edge-pick="confirmEdgePick"
         />
       </aside>
     </div>
@@ -156,6 +160,7 @@ const layoutRoot = ref<HTMLDivElement | null>(null);
 const {
   doExtrude, cancelExtrude, onExtrudeConfigChange, showExtrudePanel,
   revolve,
+  confirmEdgePick, cancelEdgePick,
   booleanDialog, confirmBoolean, cancelBoolean,
   onFeatureAction, onPatternAction,
 } = useFeatureActions(unifiedViewport);
@@ -271,6 +276,36 @@ function onFaceSelected(featureId: number, _faceIndex: number) {
 
 function onDragEnd() {
   unifiedViewport.value?.refreshViewport();
+}
+
+function onEdgeSelected(_featureId: number, _vA: number, _vB: number) {
+  // Edge selection is handled inside UnifiedViewport via store.addPickedEdge().
+  // This callback exists for potential future use (logging, analytics, etc.).
+}
+
+function toggleMeasure() {
+  sketchStore.toggleMeasure();
+}
+
+/// Enter edge-pick mode from the PropertiesPanel (when editing an existing
+/// Fillet/Chamfer feature). Uses the same target solid.
+function onEnterEdgePick() {
+  const f = sketchStore.selectedFeature;
+  if (!f) return;
+  const type = f.feature_type === "Fillet" ? "fillet" : "chamfer";
+  // Find the target solid by looking at the feature right before this one.
+  const idx = sketchStore.features.findIndex(x => x.id === f.id);
+  const solidBefore = sketchStore.features.slice(0, idx).reverse().find(fn => {
+    return ["Extrude", "Revolve", "Fillet", "Chamfer", "LinearPattern", "CircularPattern",
+      "Mirror", "Sweep", "Shell", "Boolean"].includes(fn.feature_type) ||
+      fn.feature_type.startsWith("CustomSolid");
+  });
+  const targetId = solidBefore?.id ?? null;
+  if (targetId === null) {
+    toastStore.info("找不到目标实体");
+    return;
+  }
+  sketchStore.enterEdgePickMode(type, targetId);
 }
 
 // ── Parameter editing (PropertiesPanel) ──────────────────────────

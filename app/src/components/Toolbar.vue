@@ -135,6 +135,13 @@
 
     <div class="tb-spacer"></div>
 
+    <button
+      class="tb-quick-btn"
+      :class="{ active: sketchStore.measureMode }"
+      @click="emit('toggle-measure')"
+      title="测量模式"
+    >📏 测量</button>
+
     <button class="tb-icon-btn" @click="emit('undo')" title="撤销 Ctrl+Z" :disabled="!canUndo">↩</button>
     <button class="tb-icon-btn" @click="emit('redo')" title="重做 Ctrl+Y" :disabled="!canRedo">↪</button>
   </header>
@@ -173,6 +180,7 @@ const emit = defineEmits<{
   (e: "open-plugin", gen: GeneratorInfo): void;
   (e: "offset-plane"): void;
   (e: "clear-sketch"): void;
+  (e: "toggle-measure"): void;
 }>();
 
 const sketchStore = useSketchStore();

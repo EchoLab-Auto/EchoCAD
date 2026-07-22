@@ -94,6 +94,8 @@ const emit = defineEmits<{
    *  this and call unifiedViewport.value?.refreshViewport() to keep the
    *  solid mesh in sync after sketch edits. */
   (e: "drag-end"): void;
+  /** Emitted when the user clicks an edge in edge-pick mode. */
+  (e: "edgeSelected", featureId: number, vA: number, vB: number): void;
 }>();
 
 const store = useSketchStore();
@@ -168,6 +170,256 @@ const circleRadiusDisplay = computed(() => {
 });
 
 const SOLID_COLORS = [0x4fc3f7, 0xff8a65, 0x69f0ae, 0xffd54f, 0xce93d8, 0x80cbc4, 0xf48fb1, 0xaed581, 0xfff176, 0x90caf9];
+
+// ── Highlight / edge-pick groups (added to scene after init) ───────
+let highlightGroup: THREE.Group | null = null;
+let edgeHoverLine: THREE.Line | null = null;    // temporary hover highlight
+let selectedEdgeLines: THREE.Line[] = [];        // persistent selected edges
+let measureLine: THREE.Line | null = null;
+let measureLabelSprite: THREE.Sprite | null = null;
+
+function ensureHighlightGroup(): THREE.Group {
+  if (!highlightGroup && ctx.value) {
+    highlightGroup = new THREE.Group();
+    highlightGroup.name = "edge-measure-highlights";
+    ctx.value.scene.add(highlightGroup);
+  }
+  return highlightGroup!;
+}
+
+function destroyHighlightGroup() {
+  if (!highlightGroup) return;
+  clearEdgeHighlights();
+  clearMeasureVisuals();
+  if (ctx.value) ctx.value.scene.remove(highlightGroup);
+  highlightGroup = null;
+}
+
+// ── Edge raycasting ─────────────────────────────────────────────
+
+/// Compute the closest distance between a ray and a line segment.
+/// Returns the 3D point on the segment nearest to the ray, the distance,
+/// and the parametric `t` along the segment (used to order hits).
+function rayToSegmentDistance(
+  rayOrigin: THREE.Vector3,
+  rayDir: THREE.Vector3,
+  a: THREE.Vector3,
+  b: THREE.Vector3,
+): { dist: number; point: THREE.Vector3; t: number } {
+  const ab = new THREE.Vector3().subVectors(b, a);
+  const len = ab.length();
+  if (len < 1e-10) {
+    // Degenerate segment → treat as point.
+    const v = new THREE.Vector3().subVectors(a, rayOrigin);
+    const tProj = Math.max(0, v.dot(rayDir));
+    const closest = rayOrigin.clone().addScaledVector(rayDir, tProj);
+    return { dist: closest.distanceTo(a), point: a.clone(), t: 0 };
+  }
+  ab.normalize();
+
+  const ao = new THREE.Vector3().subVectors(rayOrigin, a);
+  const cross = new THREE.Vector3().crossVectors(rayDir, ab);
+  const crossLenSq = cross.lengthSq();
+
+  let tRay: number;
+  let tSeg: number;
+
+  if (crossLenSq < 1e-9) {
+    // Parallel → project ray origin onto the infinite line, clamp to segment.
+    tRay = 0;
+    const proj = ao.dot(ab);
+    tSeg = Math.max(0, Math.min(len, proj));
+  } else {
+    const denom = crossLenSq;
+    const cross2 = new THREE.Vector3().crossVectors(ao, ab);
+    tRay = cross2.dot(cross) / denom;
+
+    const cross3 = new THREE.Vector3().crossVectors(ao, rayDir);
+    tSeg = cross3.dot(cross) / denom;
+    tSeg = Math.max(0, Math.min(len, tSeg));
+  }
+
+  if (tRay < 0) tRay = 0;
+
+  const rayPoint = rayOrigin.clone().addScaledVector(rayDir, tRay);
+  const segPoint = a.clone().addScaledVector(ab, tSeg);
+  const dist = rayPoint.distanceTo(segPoint);
+
+  return { dist, point: segPoint, t: tSeg };
+}
+
+/// Find the closest mesh edge to the raycaster's ray across all solid meshes.
+/// Returns null when no edge is within `threshold` world units.
+interface EdgeHit {
+  mesh: THREE.Mesh;
+  featureId: number;
+  vA: number;
+  vB: number;
+  point: THREE.Vector3;
+}
+function findClosestEdge(raycaster: THREE.Raycaster, threshold: number): EdgeHit | null {
+  let best: EdgeHit | null = null;
+  let bestDist = threshold;
+
+  for (const mesh of solidMeshes) {
+    const geo = mesh.geometry;
+    const posAttr = geo.getAttribute("position") as THREE.BufferAttribute;
+    const idxAttr = geo.getIndex();
+    if (!idxAttr) continue;
+
+    // Transform ray into mesh-local space.
+    const invMatrix = new THREE.Matrix4().copy(mesh.matrixWorld).invert();
+    const localOrigin = raycaster.ray.origin.clone().applyMatrix4(invMatrix);
+    const localDir = raycaster.ray.direction.clone().transformDirection(invMatrix).normalize();
+
+    const seenEdges = new Set<string>(); // dedupe shared edges
+
+    for (let i = 0; i < idxAttr.count; i += 3) {
+      const i0 = idxAttr.getX(i);
+      const i1 = idxAttr.getX(i + 1);
+      const i2 = idxAttr.getX(i + 2);
+
+      for (const [ia, ib] of [[i0, i1], [i1, i2], [i2, i0]] as [number, number][]) {
+        const key = ia < ib ? `${ia}-${ib}` : `${ib}-${ia}`;
+        if (seenEdges.has(key)) continue;
+        seenEdges.add(key);
+
+        const va = new THREE.Vector3(posAttr.getX(ia), posAttr.getY(ia), posAttr.getZ(ia));
+        const vb = new THREE.Vector3(posAttr.getX(ib), posAttr.getY(ib), posAttr.getZ(ib));
+
+        const result = rayToSegmentDistance(localOrigin, localDir, va, vb);
+        if (result.dist < bestDist) {
+          bestDist = result.dist;
+          const worldPoint = result.point.clone().applyMatrix4(mesh.matrixWorld);
+          best = {
+            mesh,
+            featureId: (mesh.userData as any).featureId ?? 0,
+            vA: ia,
+            vB: ib,
+            point: worldPoint,
+          };
+        }
+      }
+    }
+  }
+  return best;
+}
+
+// ── Edge highlight helpers ───────────────────────────────────────
+
+/// Show a temporary hover highlight on an edge.
+function showEdgeHover(mesh: THREE.Mesh, vA: number, vB: number) {
+  clearEdgeHover();
+  const pos = mesh.geometry.getAttribute("position") as THREE.BufferAttribute;
+  const a = new THREE.Vector3(pos.getX(vA), pos.getY(vA), pos.getZ(vA)).applyMatrix4(mesh.matrixWorld);
+  const b = new THREE.Vector3(pos.getX(vB), pos.getY(vB), pos.getZ(vB)).applyMatrix4(mesh.matrixWorld);
+  const geo = new THREE.BufferGeometry().setFromPoints([a, b]);
+  const mat = new THREE.LineBasicMaterial({ color: 0xffeb3b, linewidth: 1, depthTest: true, transparent: true, opacity: 0.9 });
+  edgeHoverLine = new THREE.Line(geo, mat);
+  ensureHighlightGroup().add(edgeHoverLine);
+}
+
+function clearEdgeHover() {
+  if (edgeHoverLine) {
+    edgeHoverLine.geometry.dispose();
+    (edgeHoverLine.material as THREE.Material).dispose();
+    highlightGroup?.remove(edgeHoverLine);
+    edgeHoverLine = null;
+  }
+}
+
+/// Refresh the persistent highlight for all currently-selected edges.
+function refreshSelectedEdgeHighlights() {
+  clearEdgeHighlights();
+  const edges = store.pendingEdges;
+  if (edges.length === 0) return;
+  for (const [vA, vB] of edges) {
+    // Find the mesh that owns these vertex indices.
+    for (const mesh of solidMeshes) {
+      const pos = mesh.geometry.getAttribute("position") as THREE.BufferAttribute;
+      if (vA >= pos.count || vB >= pos.count) continue;
+      const a = new THREE.Vector3(pos.getX(vA), pos.getY(vA), pos.getZ(vA)).applyMatrix4(mesh.matrixWorld);
+      const b = new THREE.Vector3(pos.getX(vB), pos.getY(vB), pos.getZ(vB)).applyMatrix4(mesh.matrixWorld);
+      const geo = new THREE.BufferGeometry().setFromPoints([a, b]);
+      const mat = new THREE.LineBasicMaterial({ color: 0x4fc3f7, linewidth: 1, depthTest: true, transparent: true, opacity: 0.85 });
+      const line = new THREE.Line(geo, mat);
+      ensureHighlightGroup().add(line);
+      selectedEdgeLines.push(line);
+      break; // assume unique match per edge
+    }
+  }
+}
+
+function clearEdgeHighlights() {
+  for (const line of selectedEdgeLines) {
+    line.geometry.dispose();
+    (line.material as THREE.Material).dispose();
+    highlightGroup?.remove(line);
+  }
+  selectedEdgeLines = [];
+}
+
+// ── Measurement visualization ────────────────────────────────────
+
+/// Build a text sprite (canvas-based) for measurement labels.
+function createTextSprite(text: string, position: THREE.Vector3, color = "#ffd54f"): THREE.Sprite {
+  const canvas = document.createElement("canvas");
+  canvas.width = 256;
+  canvas.height = 64;
+  const ctx2d = canvas.getContext("2d")!;
+  ctx2d.fillStyle = "rgba(30,30,30,0.85)";
+  ctx2d.fillRect(0, 0, canvas.width, canvas.height);
+  ctx2d.font = "bold 28px monospace";
+  ctx2d.fillStyle = color;
+  ctx2d.textAlign = "center";
+  ctx2d.textBaseline = "middle";
+  ctx2d.fillText(text, canvas.width / 2, canvas.height / 2);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  const spriteMat = new THREE.SpriteMaterial({ map: texture, depthTest: false, transparent: true });
+  const sprite = new THREE.Sprite(spriteMat);
+  sprite.position.copy(position);
+  sprite.scale.set(2, 0.5, 1);
+  return sprite;
+}
+
+function refreshMeasureVisuals() {
+  clearMeasureVisuals();
+  const pts = store.measurePoints;
+  if (pts.length < 2) return;
+
+  const group = ensureHighlightGroup();
+  const p0 = new THREE.Vector3(pts[0].x, pts[0].y, pts[0].z);
+  const p1 = new THREE.Vector3(pts[1].x, pts[1].y, pts[1].z);
+
+  // Dashed line between the two points.
+  const dashGeo = new THREE.BufferGeometry().setFromPoints([p0, p1]);
+  const dashMat = new THREE.LineDashedMaterial({ color: 0xffd54f, dashSize: 0.3, gapSize: 0.15, depthTest: true });
+  measureLine = new THREE.Line(dashGeo, dashMat);
+  measureLine.computeLineDistances();
+  group.add(measureLine);
+
+  // Distance label at the midpoint.
+  const dist = p0.distanceTo(p1);
+  const mid = new THREE.Vector3().addVectors(p0, p1).multiplyScalar(0.5);
+  measureLabelSprite = createTextSprite(`${dist.toFixed(3)}`, mid, "#ffd54f");
+  group.add(measureLabelSprite);
+}
+
+function clearMeasureVisuals() {
+  if (measureLine) {
+    measureLine.geometry.dispose();
+    (measureLine.material as THREE.Material).dispose();
+    highlightGroup?.remove(measureLine);
+    measureLine = null;
+  }
+  if (measureLabelSprite) {
+    (measureLabelSprite.material as THREE.Material).dispose();
+    highlightGroup?.remove(measureLabelSprite);
+    measureLabelSprite = null;
+  }
+}
 
 // ── Sketch plane helpers ────────────────────────────────────────
 
@@ -434,6 +686,11 @@ function clearSolids() {
   }
   solidMeshes = [];
   edgeLines = [];
+  // Edge-pick highlights and measurement visuals are tied to specific
+  // meshes — they become invalid when solids are replaced.
+  clearEdgeHover();
+  clearEdgeHighlights();
+  clearMeasureVisuals();
 }
 
 async function refreshViewport() {
@@ -479,6 +736,9 @@ async function refreshViewport() {
     }
 
     if (solidMeshes.length > 0) fitSceneView(solidMeshes);
+
+    // Restore edge-pick highlights after mesh rebuild (best-effort).
+    if (store.edgePickMode) refreshSelectedEdgeHighlights();
   } catch (err) {
     toast.error("刷新视口失败: " + String(err));
   }
@@ -578,6 +838,53 @@ function computeSnap(sketch: { x: number; y: number }, sx: number, sy: number): 
 
 async function onMouseDown(e: MouseEvent) {
   if (e.button === 1 || e.button === 2) return;
+
+  // ── Edge-pick mode (only outside sketch editing) ──────────────────
+  if (store.edgePickMode && !isSketchMode.value && ctx.value) {
+    const rect = ctx.value.renderer.domElement.getBoundingClientRect();
+    ctx.value.raycaster.setFromCamera(
+      new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1,
+      ),
+      ctx.value.camera,
+    );
+    const edgeHit = findClosestEdge(ctx.value.raycaster, 0.08);
+    if (edgeHit) {
+      store.addPickedEdge(edgeHit.vA, edgeHit.vB);
+      refreshSelectedEdgeHighlights();
+      emit("edgeSelected", edgeHit.featureId, edgeHit.vA, edgeHit.vB);
+    }
+    return;
+  }
+
+  // ── Measurement mode ──────────────────────────────────────────────
+  if (store.measureMode && !isSketchMode.value && ctx.value) {
+    const rect = ctx.value.renderer.domElement.getBoundingClientRect();
+    ctx.value.raycaster.setFromCamera(
+      new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1,
+      ),
+      ctx.value.camera,
+    );
+    const hits = ctx.value.raycaster.intersectObjects(solidMeshes);
+    if (hits.length > 0) {
+      // If we already have 2 points, clear and start fresh.
+      if (store.measurePoints.length >= 2) {
+        store.clearMeasurePoints();
+      }
+      store.measurePoints.push({
+        x: hits[0].point.x,
+        y: hits[0].point.y,
+        z: hits[0].point.z,
+      });
+      if (store.measurePoints.length >= 2) {
+        refreshMeasureVisuals();
+      }
+    }
+    return;
+  }
 
   if (isDrawing.value) {
     const sketch = getSketchPoint(e);
@@ -865,6 +1172,22 @@ async function onMouseMove(e: MouseEvent) {
   const sx = e.clientX - rect.left;
   const sy = e.clientY - rect.top;
 
+  // ── Edge hover highlight (when in edge-pick mode, outside sketch) ─
+  if (store.edgePickMode && !isSketchMode.value && ctx.value) {
+    clearEdgeHover();
+    ctx.value.raycaster.setFromCamera(
+      new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1,
+      ),
+      ctx.value.camera,
+    );
+    const edgeHit = findClosestEdge(ctx.value.raycaster, 0.05);
+    if (edgeHit) {
+      showEdgeHover(edgeHit.mesh, edgeHit.vA, edgeHit.vB);
+    }
+  }
+
   if (isSketchMode.value && store.activeTool === "select" && state.isDragging.value && state.dragId.value) {
     const sketch = getSketchPoint(e);
     if (sketch) {
@@ -966,6 +1289,7 @@ function onMouseLeave() {
   state.isHovering.value = false;
   activeSnap.value = null;
   clearSketchPreviews();
+  clearEdgeHover();
 }
 
 async function onRightClick() {
@@ -1183,6 +1507,29 @@ watch(() => store.entities, () => {
   refreshSketchEntities();
 }, { deep: true });
 
+// ── Edge-pick / measurement watchers ─────────────────────────────
+watch(() => store.measureMode, (active) => {
+  if (!active) clearMeasureVisuals();
+});
+
+watch(() => store.pendingEdges, () => {
+  refreshSelectedEdgeHighlights();
+}, { deep: true });
+
+watch(() => store.edgePickMode, (active) => {
+  if (!active) {
+    clearEdgeHover();
+    clearEdgeHighlights();
+  }
+});
+
+watch(() => store.measurePoints, () => {
+  // Keep visuals in sync when points are cleared externally.
+  if (store.measurePoints.length < 2 && measureLine) {
+    clearMeasureVisuals();
+  }
+}, { deep: true });
+
 onMounted(() => {
   initScene();
   refreshViewport();
@@ -1191,6 +1538,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  destroyHighlightGroup();
   dispose();
 });
 </script>

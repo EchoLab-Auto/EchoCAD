@@ -19,7 +19,10 @@ use commands::{
     load_project_cmd, move_point, remove_constraint, save_project_cmd, save_project_to,
     set_active_sketch, solve_sketch, undo, redo, can_undo_redo, update_constraint_value,
     update_entity_prop, delete_entity, update_parameter, rename_feature,
-    set_feature_suppressed, set_feature_color, AppState,
+    set_feature_suppressed, set_feature_color,
+    measure_distance, measure_angle,
+    update_linear_pattern, update_circular_pattern, update_mirror_params,
+    AppState,
 };
 
 #[allow(unused_imports)]
@@ -160,6 +163,11 @@ fn main() {
             undo,
             redo,
             can_undo_redo,
+            measure_distance,
+            measure_angle,
+            update_linear_pattern,
+            update_circular_pattern,
+            update_mirror_params,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

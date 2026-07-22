@@ -295,20 +295,35 @@ fn feature_to_node(f: &Feature, doc: &Document, errors: &HashMap<FeatureId, Stri
         }
         FeatureKind::LinearPattern { dir_x, dir_y, dir_z, count, spacing, .. } => {
             let mut params = Vec::new();
-            params.push(ParameterInfo { id: ParameterId(0), name: "count".into(), value: *count as f64, readonly: false });
-            params.push(ParameterInfo { id: ParameterId(0), name: "spacing".into(), value: *spacing, readonly: false });
-            params.push(ParameterInfo { id: ParameterId(0), name: "dir_x".into(), value: *dir_x, readonly: false });
-            params.push(ParameterInfo { id: ParameterId(0), name: "dir_y".into(), value: *dir_y, readonly: false });
-            params.push(ParameterInfo { id: ParameterId(0), name: "dir_z".into(), value: *dir_z, readonly: false });
+            params.push(ParameterInfo { id: ParameterId(0), name: "count".into(), value: *count as f64, readonly: true });
+            params.push(ParameterInfo { id: ParameterId(0), name: "spacing".into(), value: *spacing, readonly: true });
+            params.push(ParameterInfo { id: ParameterId(0), name: "dir_x".into(), value: *dir_x, readonly: true });
+            params.push(ParameterInfo { id: ParameterId(0), name: "dir_y".into(), value: *dir_y, readonly: true });
+            params.push(ParameterInfo { id: ParameterId(0), name: "dir_z".into(), value: *dir_z, readonly: true });
             ("LinearPattern".to_string(), params)
         }
-        FeatureKind::CircularPattern { count, total_angle_deg, .. } => {
+        FeatureKind::CircularPattern { count, total_angle_deg, axis_x, axis_y, axis_z, axis_dx, axis_dy, axis_dz, .. } => {
             let mut params = Vec::new();
-            params.push(ParameterInfo { id: ParameterId(0), name: "count".into(), value: *count as f64, readonly: false });
-            params.push(ParameterInfo { id: ParameterId(0), name: "total_angle_deg".into(), value: *total_angle_deg, readonly: false });
+            params.push(ParameterInfo { id: ParameterId(0), name: "count".into(), value: *count as f64, readonly: true });
+            params.push(ParameterInfo { id: ParameterId(0), name: "total_angle_deg".into(), value: *total_angle_deg, readonly: true });
+            params.push(ParameterInfo { id: ParameterId(0), name: "axis_x".into(), value: *axis_x, readonly: true });
+            params.push(ParameterInfo { id: ParameterId(0), name: "axis_y".into(), value: *axis_y, readonly: true });
+            params.push(ParameterInfo { id: ParameterId(0), name: "axis_z".into(), value: *axis_z, readonly: true });
+            params.push(ParameterInfo { id: ParameterId(0), name: "axis_dx".into(), value: *axis_dx, readonly: true });
+            params.push(ParameterInfo { id: ParameterId(0), name: "axis_dy".into(), value: *axis_dy, readonly: true });
+            params.push(ParameterInfo { id: ParameterId(0), name: "axis_dz".into(), value: *axis_dz, readonly: true });
             ("CircularPattern".to_string(), params)
         }
-        FeatureKind::Mirror { .. } => ("Mirror".to_string(), Vec::new()),
+        FeatureKind::Mirror { plane_nx, plane_ny, plane_nz, plane_px, plane_py, plane_pz, .. } => {
+            let mut params = Vec::new();
+            params.push(ParameterInfo { id: ParameterId(0), name: "normal_x".into(), value: *plane_nx, readonly: true });
+            params.push(ParameterInfo { id: ParameterId(0), name: "normal_y".into(), value: *plane_ny, readonly: true });
+            params.push(ParameterInfo { id: ParameterId(0), name: "normal_z".into(), value: *plane_nz, readonly: true });
+            params.push(ParameterInfo { id: ParameterId(0), name: "point_x".into(), value: *plane_px, readonly: true });
+            params.push(ParameterInfo { id: ParameterId(0), name: "point_y".into(), value: *plane_py, readonly: true });
+            params.push(ParameterInfo { id: ParameterId(0), name: "point_z".into(), value: *plane_pz, readonly: true });
+            ("Mirror".to_string(), params)
+        }
         FeatureKind::Sweep { .. } => ("Sweep".to_string(), Vec::new()),
         FeatureKind::Boolean { .. } => ("Boolean".to_string(), Vec::new()),
         FeatureKind::CustomSolid { distance, .. } => {
@@ -1398,4 +1413,138 @@ fn clear_autosave_file(app: &tauri::AppHandle) {
 #[tauri::command]
 pub fn check_recovery(state: tauri::State<AppState>) -> bool {
     state.has_recovery_file.load(Ordering::Relaxed)
+}
+
+// ── Measurement commands ──────────────────────────────────────────
+
+/// Compute the Euclidean distance between two 3D world-space points.
+/// Idempotent — no document mutation, no snapshot, no regen.
+#[tauri::command]
+pub fn measure_distance(
+    ax: f64, ay: f64, az: f64,
+    bx: f64, by: f64, bz: f64,
+) -> f64 {
+    let dx = ax - bx;
+    let dy = ay - by;
+    let dz = az - bz;
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+/// Compute the angle <p1-p2-p3 in degrees.
+/// Idempotent — no document mutation, no snapshot, no regen.
+#[tauri::command]
+pub fn measure_angle(
+    p1x: f64, p1y: f64, p1z: f64,
+    p2x: f64, p2y: f64, p2z: f64,
+    p3x: f64, p3y: f64, p3z: f64,
+) -> f64 {
+    let v1x = p1x - p2x;
+    let v1y = p1y - p2y;
+    let v1z = p1z - p2z;
+    let v2x = p3x - p2x;
+    let v2y = p3y - p2y;
+    let v2z = p3z - p2z;
+    let dot = v1x * v2x + v1y * v2y + v1z * v2z;
+    let mag1 = (v1x * v1x + v1y * v1y + v1z * v1z).sqrt();
+    let mag2 = (v2x * v2x + v2y * v2y + v2z * v2z).sqrt();
+    if mag1 < 1e-12 || mag2 < 1e-12 {
+        return 0.0;
+    }
+    let cos_theta = (dot / (mag1 * mag2)).clamp(-1.0, 1.0);
+    cos_theta.acos().to_degrees()
+}
+
+// ── Pattern / Mirror parameter update commands ────────────────────
+
+/// Update the parameters of an existing LinearPattern feature.
+/// This is a document mutation — snapshot + regen.
+#[tauri::command]
+pub fn update_linear_pattern(
+    feature_id: FeatureId,
+    count: u32,
+    spacing: f64,
+    dir_x: f64,
+    dir_y: f64,
+    dir_z: f64,
+    state: tauri::State<AppState>,
+) -> Result<(), String> {
+    state.snapshot();
+    let mut doc = state.lock_doc();
+    let feature = doc.get_feature_mut(feature_id).ok_or("feature not found")?;
+    match &mut feature.kind {
+        FeatureKind::LinearPattern {
+            count: c, spacing: s, dir_x: dx, dir_y: dy, dir_z: dz, ..
+        } => {
+            *c = count;
+            *s = spacing;
+            *dx = dir_x;
+            *dy = dir_y;
+            *dz = dir_z;
+        }
+        _ => return Err("feature is not a LinearPattern".into()),
+    }
+    regen_locked(&doc, &state);
+    Ok(())
+}
+
+/// Update the parameters of an existing CircularPattern feature.
+/// This is a document mutation — snapshot + regen.
+#[tauri::command]
+pub fn update_circular_pattern(
+    feature_id: FeatureId,
+    count: u32,
+    total_angle_deg: f64,
+    axis_x: f64,
+    axis_y: f64,
+    axis_z: f64,
+    state: tauri::State<AppState>,
+) -> Result<(), String> {
+    state.snapshot();
+    let mut doc = state.lock_doc();
+    let feature = doc.get_feature_mut(feature_id).ok_or("feature not found")?;
+    match &mut feature.kind {
+        FeatureKind::CircularPattern {
+            count: c, total_angle_deg: a,
+            axis_x: ax, axis_y: ay, axis_z: az, ..
+        } => {
+            *c = count;
+            *a = total_angle_deg;
+            *ax = axis_x;
+            *ay = axis_y;
+            *az = axis_z;
+        }
+        _ => return Err("feature is not a CircularPattern".into()),
+    }
+    regen_locked(&doc, &state);
+    Ok(())
+}
+
+/// Update the mirror plane parameters of an existing Mirror feature.
+/// This is a document mutation — snapshot + regen.
+#[tauri::command]
+pub fn update_mirror_params(
+    feature_id: FeatureId,
+    plane_nx: f64, plane_ny: f64, plane_nz: f64,
+    plane_px: f64, plane_py: f64, plane_pz: f64,
+    state: tauri::State<AppState>,
+) -> Result<(), String> {
+    state.snapshot();
+    let mut doc = state.lock_doc();
+    let feature = doc.get_feature_mut(feature_id).ok_or("feature not found")?;
+    match &mut feature.kind {
+        FeatureKind::Mirror {
+            plane_nx: nx, plane_ny: ny, plane_nz: nz,
+            plane_px: px, plane_py: py, plane_pz: pz, ..
+        } => {
+            *nx = plane_nx;
+            *ny = plane_ny;
+            *nz = plane_nz;
+            *px = plane_px;
+            *py = plane_py;
+            *pz = plane_pz;
+        }
+        _ => return Err("feature is not a Mirror".into()),
+    }
+    regen_locked(&doc, &state);
+    Ok(())
 }

@@ -508,3 +508,64 @@ export async function generatePluginFeature(
     params,
   });
 }
+
+// ── Measurement commands ──────────────────────────────────────────
+
+/** Compute the Euclidean distance between two 3D world-space points.
+ *  Idempotent — no document mutation. */
+export async function measureDistance(
+  ax: number, ay: number, az: number,
+  bx: number, by: number, bz: number,
+): Promise<number> {
+  return invoke("measure_distance", { ax, ay, az, bx, by, bz });
+}
+
+/** Compute the angle <p1-p2-p3 in degrees.
+ *  Idempotent — no document mutation. */
+export async function measureAngle(
+  p1x: number, p1y: number, p1z: number,
+  p2x: number, p2y: number, p2z: number,
+  p3x: number, p3y: number, p3z: number,
+): Promise<number> {
+  return invoke("measure_angle", { p1x, p1y, p1z, p2x, p2y, p2z, p3x, p3y, p3z });
+}
+
+// ── Pattern / Mirror parameter update commands ────────────────────
+
+/** Update parameters of an existing LinearPattern feature.
+ *  Document mutation — triggers snapshot + regen. */
+export async function updateLinearPattern(
+  featureId: FeatureId,
+  count: number,
+  spacing: number,
+  dirX: number, dirY: number, dirZ: number,
+): Promise<void> {
+  return invoke("update_linear_pattern", {
+    featureId, count, spacing, dirX, dirY, dirZ,
+  });
+}
+
+/** Update parameters of an existing CircularPattern feature.
+ *  Document mutation — triggers snapshot + regen. */
+export async function updateCircularPattern(
+  featureId: FeatureId,
+  count: number,
+  totalAngleDeg: number,
+  axisX: number, axisY: number, axisZ: number,
+): Promise<void> {
+  return invoke("update_circular_pattern", {
+    featureId, count, totalAngleDeg, axisX, axisY, axisZ,
+  });
+}
+
+/** Update the mirror plane of an existing Mirror feature.
+ *  Document mutation — triggers snapshot + regen. */
+export async function updateMirrorParams(
+  featureId: FeatureId,
+  planeNx: number, planeNy: number, planeNz: number,
+  planePx: number, planePy: number, planePz: number,
+): Promise<void> {
+  return invoke("update_mirror_params", {
+    featureId, planeNx, planeNy, planeNz, planePx, planePy, planePz,
+  });
+}
