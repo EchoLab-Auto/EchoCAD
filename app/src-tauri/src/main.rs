@@ -19,7 +19,7 @@ use commands::{
     load_project_cmd, move_point, remove_constraint, save_project_cmd, save_project_to,
     set_active_sketch, solve_sketch, undo, redo, can_undo_redo, update_constraint_value,
     update_entity_prop, delete_entity, update_parameter, rename_feature,
-    set_feature_suppressed, AppState,
+    set_feature_suppressed, set_feature_color, AppState,
 };
 
 #[allow(unused_imports)]
@@ -121,6 +121,7 @@ fn main() {
             update_parameter,
             rename_feature,
             set_feature_suppressed,
+            set_feature_color,
             delete_feature,
             get_sketch_entities,
             get_sketch_constraints,

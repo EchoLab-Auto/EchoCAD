@@ -275,6 +275,10 @@ export async function setFeatureSuppressed(
   return invoke("set_feature_suppressed", { id, suppressed });
 }
 
+export async function setFeatureColor(featureId: number, color: string | null): Promise<void> {
+  return invoke("set_feature_color", { featureId, color });
+}
+
 export async function deleteFeature(
   id: FeatureId,
   cascade?: boolean

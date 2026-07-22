@@ -196,13 +196,12 @@ const hasCustomColor = computed(() => {
 });
 
 /// Called when the native color input changes. Stores the selected color
-/// in the featureColors map so the viewport picks it up on next refresh.
-/// TODO: when a backend set_feature_color command is added, call it here.
+/// in the featureColors map and persists it to the backend.
 function onColorChange(event: Event) {
   const input = event.target as HTMLInputElement;
   const hex = input.value;
   if (selectedFeature.value) {
-    sketchStore.setFeatureColor(selectedFeature.value.id, hex);
+    sketchStore.persistFeatureColor(selectedFeature.value.id, hex);
   }
 }
 
@@ -210,13 +209,7 @@ function onColorChange(event: Event) {
 /// default palette color.
 function resetColor() {
   if (!selectedFeature.value) return;
-  const id = selectedFeature.value.id;
-  // Remove the key for this feature from the color map.
-  const next: Record<number, string> = {};
-  for (const [k, v] of Object.entries(sketchStore.featureColors)) {
-    if (Number(k) !== id) next[Number(k)] = v;
-  }
-  sketchStore.featureColors = next;
+  sketchStore.persistFeatureColor(selectedFeature.value.id, null);
 }
 
 const selectedEntity = computed<SketchEntity | null>(() => {

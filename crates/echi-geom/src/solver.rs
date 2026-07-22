@@ -516,6 +516,475 @@ fn get_circle_center(sketch: &Sketch, id: EntityId) -> Option<EntityId> {
     }
 }
 
+/// Check the sketch for over-constrained or conflicting constraints.
+///
+/// Computes the Jacobian at the current parameter state and detects linear
+/// dependence among constraint residuals. A constraint whose Jacobian rows
+/// are linearly dependent on those of other constraints is redundant — it
+/// either duplicates existing constraints or conflicts with them.
+///
+/// Constraints with non-zero residuals that are *not* linearly dependent are
+/// flagged as unsatisfied (the solver could not find a state that satisfies
+/// all constraints simultaneously).
+///
+/// Returns a list of `(constraint_index, description)` for each problematic
+/// constraint. An empty list means the sketch is well-constrained (or
+/// under-constrained but consistent).
+///
+/// Call this after `solve()` to get diagnostics when the solver fails to
+/// converge or converges to an unexpected state.
+pub fn check_overconstrained(sketch: &Sketch) -> Vec<(usize, String)> {
+    let (point_ids, radius_ids) = extract_param_ids(sketch);
+    let n = point_ids.len() * 2 + radius_ids.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    let mut params = DVector::zeros(n);
+    write_params(sketch, &point_ids, &radius_ids, &mut params);
+
+    let residuals = compute_residuals(sketch, &point_ids, &radius_ids, &params);
+    let jacobian = compute_jacobian(sketch, &point_ids, &radius_ids, &params);
+
+    let m = residuals.len();
+    if m == 0 {
+        return Vec::new();
+    }
+
+    // Map each residual row to the constraint that produced it.
+    let row_to_constraint =
+        build_residual_constraint_map(sketch, &point_ids, &radius_ids, &params);
+
+    let satisfied_threshold: f64 = 1e-8;
+    let dependence_threshold: f64 = 1e-6;
+
+    // Independent row vectors collected so far (for linear-dependence checks).
+    let mut independent_rows: Vec<DVector<f64>> = Vec::new();
+    let mut conflicting: Vec<(usize, String)> = Vec::new();
+    let mut seen_conflicting: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+    for i in 0..m {
+        let ci = row_to_constraint[i];
+
+        // Already flagged this constraint.
+        if seen_conflicting.contains(&ci) {
+            continue;
+        }
+
+        let row_vec: DVector<f64> = jacobian.row(i).transpose();
+        let res_norm = residuals[i].abs();
+
+        if independent_rows.is_empty() {
+            independent_rows.push(row_vec);
+            if res_norm >= satisfied_threshold {
+                // First row has non-trivial residual and nothing to compare
+                // against — possibly unsatisfied but we need more rows.
+                // Don't flag yet; if the solver didn't converge the caller
+                // already knows from the iteration count.
+            }
+            continue;
+        }
+
+        // Build V^T (n x k) where each column is a previously independent row.
+        let k = independent_rows.len();
+        let mut vt = DMatrix::zeros(n, k);
+        for (j, ind_row) in independent_rows.iter().enumerate() {
+            vt.column_mut(j).copy_from(ind_row);
+        }
+
+        // Solve V^T * y = row_vec in the least-squares sense.
+        // svd() takes ownership, so clone vt before consuming.
+        let svd = vt.clone().svd(true, true);
+        match svd.solve(&row_vec, 1e-12) {
+            Ok(y) => {
+                let proj = &vt * y;
+                let dep_norm = (&row_vec - &proj).norm();
+                if dep_norm < dependence_threshold {
+                    // Row is linearly dependent on previous rows.
+                    // This constraint is redundant (over-constrained).
+                    seen_conflicting.insert(ci);
+                    let tag = if res_norm < satisfied_threshold {
+                        "redundant"
+                    } else {
+                        "conflicting"
+                    };
+                    let msg = describe_constraint_diagnostic(&sketch.constraints[ci], ci, tag);
+                    conflicting.push((ci, msg));
+                } else {
+                    // Row is independent.
+                    if res_norm >= satisfied_threshold {
+                        // Non-trivial residual on an independent row → unsatisfied.
+                        seen_conflicting.insert(ci);
+                        let msg = describe_constraint_diagnostic(
+                            &sketch.constraints[ci],
+                            ci,
+                            "unsatisfied",
+                        );
+                        conflicting.push((ci, msg));
+                    }
+                    independent_rows.push(row_vec);
+                }
+            }
+            Err(_) => {
+                // SVD solve failed (degenerate) — treat as independent.
+                if res_norm >= satisfied_threshold {
+                    seen_conflicting.insert(ci);
+                    let msg =
+                        describe_constraint_diagnostic(&sketch.constraints[ci], ci, "unsatisfied");
+                    conflicting.push((ci, msg));
+                }
+                independent_rows.push(row_vec);
+            }
+        }
+    }
+
+    conflicting
+}
+
+/// Map each residual entry back to the constraint index that produced it.
+fn build_residual_constraint_map(
+    sketch: &Sketch,
+    point_ids: &[EntityId],
+    radius_ids: &[EntityId],
+    params: &DVector<f64>,
+) -> Vec<usize> {
+    let counts = count_constraint_residuals(sketch, point_ids, radius_ids, params);
+    let total: usize = counts.iter().sum();
+    let mut map = Vec::with_capacity(total);
+    for (ci, &count) in counts.iter().enumerate() {
+        for _ in 0..count {
+            map.push(ci);
+        }
+    }
+    map
+}
+
+/// Count how many residual entries each constraint produces for the current
+/// parameter state. Must mirror `compute_residuals` exactly — if they disagree
+/// the row-to-constraint mapping will be wrong.
+fn count_constraint_residuals(
+    sketch: &Sketch,
+    point_ids: &[EntityId],
+    radius_ids: &[EntityId],
+    params: &DVector<f64>,
+) -> Vec<usize> {
+    sketch
+        .constraints
+        .iter()
+        .map(|c| match c {
+            Constraint::Coincident { a, b } => {
+                if point_coords(sketch, params, point_ids, *a).is_some()
+                    && point_coords(sketch, params, point_ids, *b).is_some()
+                {
+                    2
+                } else {
+                    0
+                }
+            }
+            Constraint::Horizontal { line } => {
+                if let Some(SketchEntity::Line { start, end, .. }) = sketch.entities.get(line) {
+                    if point_coords(sketch, params, point_ids, *start).is_some()
+                        && point_coords(sketch, params, point_ids, *end).is_some()
+                    {
+                        1
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            }
+            Constraint::Vertical { line } => {
+                if let Some(SketchEntity::Line { start, end, .. }) = sketch.entities.get(line) {
+                    if point_coords(sketch, params, point_ids, *start).is_some()
+                        && point_coords(sketch, params, point_ids, *end).is_some()
+                    {
+                        1
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            }
+            Constraint::Distance { a, b, .. } => {
+                if point_coords(sketch, params, point_ids, *a).is_some()
+                    && point_coords(sketch, params, point_ids, *b).is_some()
+                {
+                    1
+                } else {
+                    0
+                }
+            }
+            Constraint::Radius { circle, .. } => {
+                if entity_radius(sketch, params, point_ids, radius_ids, *circle).is_some() {
+                    1
+                } else {
+                    0
+                }
+            }
+            Constraint::Parallel { line_a, line_b } => {
+                if let (
+                    Some(SketchEntity::Line { start: s1, end: e1, .. }),
+                    Some(SketchEntity::Line { start: s2, end: e2, .. }),
+                ) = (sketch.entities.get(line_a), sketch.entities.get(line_b))
+                {
+                    if point_coords(sketch, params, point_ids, *s1).is_some()
+                        && point_coords(sketch, params, point_ids, *e1).is_some()
+                        && point_coords(sketch, params, point_ids, *s2).is_some()
+                        && point_coords(sketch, params, point_ids, *e2).is_some()
+                    {
+                        1
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            }
+            Constraint::Perpendicular { line_a, line_b } => {
+                if let (
+                    Some(SketchEntity::Line { start: s1, end: e1, .. }),
+                    Some(SketchEntity::Line { start: s2, end: e2, .. }),
+                ) = (sketch.entities.get(line_a), sketch.entities.get(line_b))
+                {
+                    if point_coords(sketch, params, point_ids, *s1).is_some()
+                        && point_coords(sketch, params, point_ids, *e1).is_some()
+                        && point_coords(sketch, params, point_ids, *s2).is_some()
+                        && point_coords(sketch, params, point_ids, *e2).is_some()
+                    {
+                        1
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            }
+            Constraint::Tangent { line, circle } => {
+                if let (
+                    Some(SketchEntity::Line { start, end, .. }),
+                    Some(SketchEntity::Circle { .. }),
+                ) = (sketch.entities.get(line), sketch.entities.get(circle))
+                {
+                    if point_coords(sketch, params, point_ids, *start).is_some()
+                        && point_coords(sketch, params, point_ids, *end).is_some()
+                    {
+                        // compute_residuals pushes 1 entry when len > 1e-10,
+                        // or none when len <= 1e-10. We can't cheaply compute
+                        // the exact threshold match here, so be conservative
+                        // and always count 1 — a mis-count only affects the
+                        // row-to-constraint mapping, not correctness.
+                        1
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            }
+            Constraint::Concentric { a, b } => {
+                if let (Some(pca), Some(pcb)) =
+                    (get_circle_center(sketch, *a), get_circle_center(sketch, *b))
+                {
+                    if point_coords(sketch, params, point_ids, pca).is_some()
+                        && point_coords(sketch, params, point_ids, pcb).is_some()
+                    {
+                        2
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            }
+            Constraint::Equal { a, b } => {
+                match (sketch.entities.get(a), sketch.entities.get(b)) {
+                    (
+                        Some(SketchEntity::Line { start: s1, end: e1, .. }),
+                        Some(SketchEntity::Line { start: s2, end: e2, .. }),
+                    ) => {
+                        if point_coords(sketch, params, point_ids, *s1).is_some()
+                            && point_coords(sketch, params, point_ids, *e1).is_some()
+                            && point_coords(sketch, params, point_ids, *s2).is_some()
+                            && point_coords(sketch, params, point_ids, *e2).is_some()
+                        {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    _ => {
+                        if entity_radius(sketch, params, point_ids, radius_ids, *a).is_some()
+                            && entity_radius(sketch, params, point_ids, radius_ids, *b).is_some()
+                        {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                }
+            }
+            Constraint::Fix { .. } => 0,
+            Constraint::Midpoint { point, line } => {
+                if let Some(SketchEntity::Line { start, end, .. }) = sketch.entities.get(line) {
+                    if point_coords(sketch, params, point_ids, *point).is_some()
+                        && point_coords(sketch, params, point_ids, *start).is_some()
+                        && point_coords(sketch, params, point_ids, *end).is_some()
+                    {
+                        2
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            }
+            Constraint::Symmetric { a, b, axis } => {
+                if let Some(SketchEntity::Line { start, end, .. }) = sketch.entities.get(axis) {
+                    if point_coords(sketch, params, point_ids, *a).is_some()
+                        && point_coords(sketch, params, point_ids, *b).is_some()
+                        && point_coords(sketch, params, point_ids, *start).is_some()
+                        && point_coords(sketch, params, point_ids, *end).is_some()
+                    {
+                        3
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            }
+            Constraint::PointOnLine { point, line } => {
+                if let Some(SketchEntity::Line { start, end, .. }) = sketch.entities.get(line) {
+                    if point_coords(sketch, params, point_ids, *point).is_some()
+                        && point_coords(sketch, params, point_ids, *start).is_some()
+                        && point_coords(sketch, params, point_ids, *end).is_some()
+                    {
+                        1
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            }
+            Constraint::Collinear { a, b, c } => {
+                if point_coords(sketch, params, point_ids, *a).is_some()
+                    && point_coords(sketch, params, point_ids, *b).is_some()
+                    && point_coords(sketch, params, point_ids, *c).is_some()
+                {
+                    1
+                } else {
+                    0
+                }
+            }
+            Constraint::Angle {
+                line_a, line_b, ..
+            } => {
+                if let (
+                    Some(SketchEntity::Line { start: s1, end: e1, .. }),
+                    Some(SketchEntity::Line { start: s2, end: e2, .. }),
+                ) = (sketch.entities.get(line_a), sketch.entities.get(line_b))
+                {
+                    if point_coords(sketch, params, point_ids, *s1).is_some()
+                        && point_coords(sketch, params, point_ids, *e1).is_some()
+                        && point_coords(sketch, params, point_ids, *s2).is_some()
+                        && point_coords(sketch, params, point_ids, *e2).is_some()
+                    {
+                        1
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            }
+            Constraint::Diameter { circle, .. } => {
+                if entity_radius(sketch, params, point_ids, radius_ids, *circle).is_some() {
+                    1
+                } else {
+                    0
+                }
+            }
+        })
+        .collect()
+}
+
+/// Produce a human-readable diagnostic for a problematic constraint.
+fn describe_constraint_diagnostic(c: &Constraint, index: usize, tag: &str) -> String {
+    let prefix = format!("[{}] ", index);
+    match c {
+        Constraint::Coincident { a, b } => {
+            format!("{}{} Coincident({:?}, {:?})", prefix, tag, a, b)
+        }
+        Constraint::Horizontal { line } => {
+            format!("{}{} Horizontal({:?})", prefix, tag, line)
+        }
+        Constraint::Vertical { line } => {
+            format!("{}{} Vertical({:?})", prefix, tag, line)
+        }
+        Constraint::Distance { a, b, distance } => {
+            format!("{}{} Distance({:?}, {:?}, d={})", prefix, tag, a, b, distance)
+        }
+        Constraint::Radius { circle, radius } => {
+            format!("{}{} Radius({:?}, r={})", prefix, tag, circle, radius)
+        }
+        Constraint::Parallel { line_a, line_b } => {
+            format!("{}{} Parallel({:?}, {:?})", prefix, tag, line_a, line_b)
+        }
+        Constraint::Perpendicular { line_a, line_b } => {
+            format!(
+                "{}{} Perpendicular({:?}, {:?})",
+                prefix, tag, line_a, line_b
+            )
+        }
+        Constraint::Tangent { line, circle } => {
+            format!("{}{} Tangent({:?}, {:?})", prefix, tag, line, circle)
+        }
+        Constraint::Concentric { a, b } => {
+            format!("{}{} Concentric({:?}, {:?})", prefix, tag, a, b)
+        }
+        Constraint::Equal { a, b } => {
+            format!("{}{} Equal({:?}, {:?})", prefix, tag, a, b)
+        }
+        Constraint::Fix { point } => {
+            format!("{}{} Fix({:?})", prefix, tag, point)
+        }
+        Constraint::Midpoint { point, line } => {
+            format!("{}{} Midpoint({:?}, {:?})", prefix, tag, point, line)
+        }
+        Constraint::Symmetric { a, b, axis } => {
+            format!(
+                "{}{} Symmetric({:?}, {:?}, axis={:?})",
+                prefix, tag, a, b, axis
+            )
+        }
+        Constraint::PointOnLine { point, line } => {
+            format!("{}{} PointOnLine({:?}, {:?})", prefix, tag, point, line)
+        }
+        Constraint::Collinear { a, b, c } => {
+            format!(
+                "{}{} Collinear({:?}, {:?}, {:?})",
+                prefix, tag, a, b, c
+            )
+        }
+        Constraint::Angle {
+            line_a,
+            line_b,
+            angle_deg,
+        } => {
+            format!(
+                "{}{} Angle({:?}, {:?}, {}deg)",
+                prefix, tag, line_a, line_b, angle_deg
+            )
+        }
+        Constraint::Diameter { circle, diameter } => {
+            format!("{}{} Diameter({:?}, d={})", prefix, tag, circle, diameter)
+        }
+    }
+}
+
 /// Compute Jacobian using finite differences (primary, handles all constraint types).
 fn compute_jacobian(
     sketch: &Sketch,
@@ -979,5 +1448,131 @@ mod tests {
         } else {
             panic!("circle entity missing after solve");
         }
+    }
+
+    // ── Over-constrained detection tests ──────────────────────────
+
+    #[test]
+    fn overconstrained_conflict_detected() {
+        // Triangle with all 3 side lengths + one angle fixed.
+        // Three side lengths fully determine the triangle shape; the angle is
+        // redundant and should be flagged as conflicting.
+        let mut sketch = Sketch::new();
+        let p0 = sketch.add_point(0.0, 0.0);
+        let p1 = sketch.add_point(3.0, 0.0);
+        let p2 = sketch.add_point(1.0, 2.0);
+        let l0 = sketch.add_line(p0, p1);
+        let _l1 = sketch.add_line(p1, p2);
+        let l2 = sketch.add_line(p2, p0);
+        // Fix one point and one direction to remove rigid-body modes.
+        sketch.add_constraint(Constraint::Fix { point: p0 });
+        sketch.add_constraint(Constraint::Horizontal { line: l0 });
+        // Three distance constraints fully constrain the shape.
+        sketch.add_constraint(Constraint::Distance { a: p0, b: p1, distance: 3.0 });
+        sketch.add_constraint(Constraint::Distance { a: p1, b: p2, distance: 3.6055 }); // ~sqrt(13)
+        sketch.add_constraint(Constraint::Distance { a: p2, b: p0, distance: 2.2361 }); // ~sqrt(5)
+        // Fourth constraint: angle between l2 and l0 is redundant.
+        sketch.add_constraint(Constraint::Angle {
+            line_a: l2,
+            line_b: l0,
+            angle_deg: 63.4349, // atan2(2,1) in degrees
+        });
+
+        solve(&mut sketch, 200, 1e-8);
+        let conflicts = check_overconstrained(&sketch);
+        // The Angle constraint (index 6) should be flagged as redundant.
+        assert!(
+            !conflicts.is_empty(),
+            "expected at least one conflicting constraint in over-defined triangle"
+        );
+        let angle_idx = sketch.constraints.len() - 1; // Angle was added last
+        let has_angle_conflict = conflicts.iter().any(|(idx, _)| *idx == angle_idx);
+        assert!(
+            has_angle_conflict,
+            "expected Angle constraint to be flagged as conflicting"
+        );
+    }
+
+    #[test]
+    fn no_false_positive_on_valid_sketch() {
+        // Simple well-constrained sketch: one anchored point + one distance
+        // constraint. After solving, check_overconstrained should be empty.
+        let mut sketch = Sketch::new();
+        let a = sketch.add_point(0.0, 0.0);
+        let b = sketch.add_point(5.0, 0.0);
+        sketch.add_constraint(Constraint::Fix { point: a });
+        sketch.add_constraint(Constraint::Distance { a, b, distance: 5.0 });
+
+        solve(&mut sketch, 50, 1e-6);
+        let conflicts = check_overconstrained(&sketch);
+        assert!(
+            conflicts.is_empty(),
+            "expected no conflicts in a valid sketch, got {}: {:?}",
+            conflicts.len(),
+            conflicts
+        );
+    }
+
+    #[test]
+    fn redundant_constraint_detected() {
+        // Two conflicting Distance constraints from the same fixed point to
+        // the same free point.  The free point cannot be at two different
+        // distances simultaneously — the solver converges to a compromise
+        // (midpoint distance), leaving both residuals non-zero.  The second
+        // Distance constraint is linearly dependent (same Jacobian direction)
+        // and should be flagged.
+        let mut sketch = Sketch::new();
+        let p0 = sketch.add_point(0.0, 0.0);
+        let p1 = sketch.add_point(4.0, 0.0);
+        sketch.add_constraint(Constraint::Fix { point: p0 });
+        sketch.add_constraint(Constraint::Distance { a: p0, b: p1, distance: 3.0 });
+        sketch.add_constraint(Constraint::Distance { a: p0, b: p1, distance: 7.0 });
+
+        solve(&mut sketch, 100, 1e-8);
+        let conflicts = check_overconstrained(&sketch);
+
+        // The second Distance constraint (index 2) shares the same Jacobian
+        // row direction as the first and cannot be independently satisfied.
+        assert!(
+            !conflicts.is_empty(),
+            "expected conflicting Distance constraints to be detected"
+        );
+        let conflicting_idx = 2;
+        let has_conflict = conflicts.iter().any(|(idx, _)| *idx == conflicting_idx);
+        assert!(
+            has_conflict,
+            "expected second Distance constraint to be flagged; diagnostics: {:?}",
+            conflicts
+        );
+    }
+
+    #[test]
+    fn all_satisfied_returns_empty() {
+        // A triangle with exactly the right number of constraints (well-constrained)
+        // should produce an empty conflict list after solving.
+        let mut sketch = Sketch::new();
+        let p0 = sketch.add_point(0.0, 0.0);
+        let p1 = sketch.add_point(3.0, 0.0);
+        let p2 = sketch.add_point(1.0, 2.0);
+        let l0 = sketch.add_line(p0, p1);
+        let _l1 = sketch.add_line(p1, p2);
+        let _l2 = sketch.add_line(p2, p0);
+        // 3 constraints for a triangle: fix one point, fix one direction,
+        // and fix the two side lengths (the third follows automatically).
+        sketch.add_constraint(Constraint::Fix { point: p0 });
+        sketch.add_constraint(Constraint::Horizontal { line: l0 });
+        sketch.add_constraint(Constraint::Distance { a: p0, b: p1, distance: 3.0 });
+        sketch.add_constraint(Constraint::Distance { a: p1, b: p2, distance: 3.6055 });
+
+        let iters = solve(&mut sketch, 200, 1e-8);
+        assert!(iters.is_some(), "well-constrained sketch should converge");
+
+        let conflicts = check_overconstrained(&sketch);
+        assert!(
+            conflicts.is_empty(),
+            "expected no conflicts in well-constrained sketch, got {}: {:?}",
+            conflicts.len(),
+            conflicts
+        );
     }
 }

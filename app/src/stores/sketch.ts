@@ -9,6 +9,7 @@ import type {
   GeneratorInfo,
   PluginInfo,
 } from "@/commands/sketch";
+import { setFeatureColor as setFeatureColorCmd } from "@/commands/sketch";
 
 export type Tool = "select" | "line" | "circle" | "arc" | "rectangle" | "spline" | "ellipse" | "plugin";
 
@@ -160,6 +161,23 @@ export const useSketchStore = defineStore("sketch", () => {
     featureColors.value = { ...featureColors.value, [featureId]: hex };
   }
 
+  /// Persist a per-feature color override. Writes to the store immediately
+  /// so the viewport picks up the change on the next refresh. Pass `null` to
+  /// remove the override and revert to the default palette color.
+  /// Also calls the backend set_feature_color command so the color survives
+  /// project save/load (M14).
+  async function persistFeatureColor(featureId: number, hex: string | null) {
+    if (hex === null) {
+      const next: Record<number, string> = { ...featureColors.value };
+      delete next[featureId];
+      featureColors.value = next;
+      setFeatureColorCmd(featureId, null).catch(() => {});
+    } else {
+      featureColors.value = { ...featureColors.value, [featureId]: hex };
+      setFeatureColorCmd(featureId, hex).catch(() => {});
+    }
+  }
+
   return {
     entities,
     constraints,
@@ -190,6 +208,7 @@ export const useSketchStore = defineStore("sketch", () => {
     setGenerators,
     setActivePluginTool,
     setFeatureColor,
+    persistFeatureColor,
     isEditingSketch,
   };
 });

@@ -202,6 +202,10 @@ pub struct FeatureNode {
     pub errors: Option<String>,
     /// For sketch features, the plane the sketch lives on ("xy" / "yz" / "zx").
     pub plane: Option<String>,
+    /// Optional per-feature color as a hex string (e.g. "#ff8800").
+    /// `None` means the renderer should use the default palette-based color.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -328,6 +332,7 @@ fn feature_to_node(f: &Feature, doc: &Document, errors: &HashMap<FeatureId, Stri
         has_dependents: doc.has_dependents(f.id()),
         errors: errors.get(&f.id()).cloned(),
         plane,
+        color: f.color.clone(),
     }
 }
 
@@ -654,6 +659,16 @@ pub fn set_feature_suppressed(id: FeatureId, suppressed: bool, state: tauri::Sta
 }
 
 #[tauri::command]
+pub fn set_feature_color(feature_id: FeatureId, color: Option<String>, state: tauri::State<AppState>) -> Result<(), String> {
+    // No snapshot — color is cosmetic, not a structural mutation (design principle #3).
+    let mut doc = state.lock_doc();
+    let feature = doc.get_feature_mut(feature_id).ok_or("feature not found")?;
+    feature.color = color.clone();
+    regen_locked(&doc, &state);
+    Ok(())
+}
+
+#[tauri::command]
 /// Delete a feature. Returns Err with a list of dependent IDs if the
 /// feature has downstream dependencies — the UI can then ask the user
 /// to confirm cascading delete.
@@ -863,9 +878,17 @@ pub fn update_constraint_value(constraint: Constraint, state: tauri::State<AppSt
     }).unwrap_or(false)
 }
 #[tauri::command]
-pub fn solve_sketch(state: tauri::State<AppState>) {
+pub fn solve_sketch(state: tauri::State<AppState>) -> Vec<String> {
     state.snapshot();
-    state.with_active_sketch_mut(|s| { echi_geom::solve(s, 100, 1e-6); });
+    let mut diagnostics = Vec::new();
+    state.with_active_sketch_mut(|s| {
+        echi_geom::solve(s, 100, 1e-6);
+        diagnostics = echi_geom::check_overconstrained(s)
+            .into_iter()
+            .map(|(_, msg)| msg)
+            .collect();
+    });
+    diagnostics
 }
 
 #[tauri::command]

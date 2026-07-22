@@ -16,5 +16,5 @@ pub use fillet::{apply_chamfer, apply_chamfer_edges, apply_fillet, apply_fillet_
 pub use pattern::{circular_pattern, linear_pattern, mirror_across_plane};
 pub use revolve::revolve;
 pub use shell::shell_mesh;
-pub use solver::solve;
+pub use solver::{check_overconstrained, solve};
 pub use sweep::sweep_mesh;
