@@ -1415,6 +1415,15 @@ pub fn check_recovery(state: tauri::State<AppState>) -> bool {
     state.has_recovery_file.load(Ordering::Relaxed)
 }
 
+// ── Mass properties DTO ───────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MassPropertiesDto {
+    pub volume: f64,
+    pub surface_area: f64,
+    pub centroid: [f64; 3],
+}
+
 // ── Measurement commands ──────────────────────────────────────────
 
 /// Compute the Euclidean distance between two 3D world-space points.
@@ -1452,6 +1461,23 @@ pub fn measure_angle(
     }
     let cos_theta = (dot / (mag1 * mag2)).clamp(-1.0, 1.0);
     cos_theta.acos().to_degrees()
+}
+
+/// Compute mass properties (volume, surface area, centroid) for a
+/// feature's solid mesh.  Idempotent — no snapshot, no mutation.
+#[tauri::command]
+pub fn get_mass_properties(
+    feature_id: FeatureId,
+    state: tauri::State<AppState>,
+) -> Result<MassPropertiesDto, String> {
+    let result = state.lock_regen();
+    let mesh = result.solids.get(&feature_id).ok_or("feature has no solid mesh")?;
+    let props = echi_geom::compute_mass_properties(mesh).ok_or("empty mesh")?;
+    Ok(MassPropertiesDto {
+        volume: props.volume,
+        surface_area: props.surface_area,
+        centroid: props.centroid,
+    })
 }
 
 // ── Pattern / Mirror parameter update commands ────────────────────

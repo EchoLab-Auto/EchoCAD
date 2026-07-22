@@ -20,7 +20,7 @@ use commands::{
     set_active_sketch, solve_sketch, undo, redo, can_undo_redo, update_constraint_value,
     update_entity_prop, delete_entity, update_parameter, rename_feature,
     set_feature_suppressed, set_feature_color,
-    measure_distance, measure_angle,
+    measure_distance, measure_angle, get_mass_properties,
     update_linear_pattern, update_circular_pattern, update_mirror_params,
     AppState,
 };
@@ -165,6 +165,7 @@ fn main() {
             can_undo_redo,
             measure_distance,
             measure_angle,
+            get_mass_properties,
             update_linear_pattern,
             update_circular_pattern,
             update_mirror_params,

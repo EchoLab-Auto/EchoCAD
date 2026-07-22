@@ -2,17 +2,36 @@ use crate::feature::{Feature, FeatureId, FeatureKind};
 use crate::parameter::{Parameter, ParameterId};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+fn default_format_version() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {
+    #[serde(default = "default_format_version")]
+    pub format_version: u32,
     pub name: String,
     pub features: Vec<Feature>,
     pub parameters: Vec<Parameter>,
     next_id: u64,
 }
 
+impl Default for Document {
+    fn default() -> Self {
+        Self {
+            format_version: 1,
+            name: String::new(),
+            features: Vec::new(),
+            parameters: Vec::new(),
+            next_id: 0,
+        }
+    }
+}
+
 impl Document {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            format_version: 1,
             name: name.into(),
             features: Vec::new(),
             parameters: Vec::new(),

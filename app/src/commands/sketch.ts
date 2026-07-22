@@ -530,6 +530,20 @@ export async function measureAngle(
   return invoke("measure_angle", { p1x, p1y, p1z, p2x, p2y, p2z, p3x, p3y, p3z });
 }
 
+// ── Mass properties ─────────────────────────────────────────────
+
+export interface MassProperties {
+  volume: number;
+  surface_area: number;
+  centroid: [number, number, number];
+}
+
+/** Compute mass properties for a feature's solid mesh.
+ *  Idempotent — no document mutation. */
+export async function getMassProperties(featureId: FeatureId): Promise<MassProperties | null> {
+  return invoke("get_mass_properties", { featureId });
+}
+
 // ── Pattern / Mirror parameter update commands ────────────────────
 
 /** Update parameters of an existing LinearPattern feature.

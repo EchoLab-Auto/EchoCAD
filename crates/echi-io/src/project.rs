@@ -10,6 +10,47 @@ pub enum ProjectError {
     Io(#[from] std::io::Error),
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
+    #[error("unsupported format version: {0}")]
+    UnsupportedVersion(String),
+}
+
+/// Current format version written by `save_project`.
+pub const CURRENT_FORMAT_VERSION: u32 = 1;
+
+/// Migrate a project JSON string to the current format version.
+///
+/// Reads `format_version` from the JSON object (defaults to 0 if absent),
+/// applies the migration chain, and returns the updated JSON string.
+pub fn migrate_project(json: &str) -> Result<String, ProjectError> {
+    let mut value: serde_json::Value = serde_json::from_str(json)?;
+
+    let version = match value.get("format_version") {
+        Some(v) if v.is_number() => v.as_u64().unwrap_or(0),
+        Some(_) => {
+            return Err(ProjectError::UnsupportedVersion(
+                "unknown (non-numeric)".to_string(),
+            ));
+        }
+        None => 0,
+    };
+
+    if version > CURRENT_FORMAT_VERSION as u64 {
+        return Err(ProjectError::UnsupportedVersion(version.to_string()));
+    }
+
+    // version 0 → 1: inject the format_version field.
+    if version == 0 {
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert(
+                "format_version".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(1)),
+            );
+        }
+    }
+
+    // version == 1: no migration needed.
+
+    serde_json::to_string(&value).map_err(ProjectError::from)
 }
 
 /// Save a document to a project file.
@@ -19,10 +60,11 @@ pub fn save_project(doc: &Document, path: impl AsRef<Path>) -> Result<(), Projec
     Ok(())
 }
 
-/// Load a document from a project file.
+/// Load a document from a project file, migrating the format if necessary.
 pub fn load_project(path: impl AsRef<Path>) -> Result<Document, ProjectError> {
-    let bytes = std::fs::read(path)?;
-    let doc = serde_json::from_slice(&bytes)?;
+    let raw = std::fs::read_to_string(path)?;
+    let migrated = migrate_project(&raw)?;
+    let doc = serde_json::from_str(&migrated)?;
     Ok(doc)
 }
 
@@ -65,6 +107,7 @@ mod tests {
         // Clean up before asserting so a failing assertion never leaks the file.
         let _ = std::fs::remove_file(&path);
 
+        assert_eq!(loaded.format_version, 1, "saved doc must carry format_version 1");
         assert_eq!(loaded.name, "roundtrip-test");
         assert_eq!(loaded.features.len(), 2, "feature count must round-trip");
         assert!(
@@ -163,6 +206,100 @@ mod tests {
                 assert_eq!(*target_b, FeatureId(2));
             }
             other => panic!("expected Boolean, got {:?}", other),
+        }
+    }
+
+    // ── format version / migration tests ──────────────────────────────
+
+    #[test]
+    fn migrate_v0_to_v1() {
+        // JSON without format_version should get format_version: 1.
+        let input = r#"{"name":"old-project","features":[],"parameters":[],"next_id":1}"#;
+        let migrated = migrate_project(input).expect("migration should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&migrated).expect("migrated output must be valid JSON");
+        assert_eq!(
+            parsed["format_version"].as_u64(),
+            Some(1),
+            "v0 JSON should get format_version: 1"
+        );
+    }
+
+    #[test]
+    fn v1_passthrough() {
+        // JSON already at version 1 should pass through unchanged.
+        let input =
+            r#"{"format_version":1,"name":"v1-project","features":[],"parameters":[],"next_id":1}"#;
+        let migrated = migrate_project(input).expect("migration should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&migrated).expect("migrated output must be valid JSON");
+        assert_eq!(parsed["format_version"].as_u64(), Some(1));
+        assert_eq!(parsed["name"].as_str(), Some("v1-project"));
+    }
+
+    #[test]
+    fn roundtrip_v1_format_version() {
+        // save_project writes format_version: 1; load_project preserves it.
+        let mut doc = Document::new("roundtrip-v1");
+        doc.add_feature(Feature::new(
+            FeatureId(1),
+            "Sketch1",
+            FeatureKind::Sketch {
+                sketch: Sketch::new(),
+                plane: PlaneDefinition::XY,
+            },
+        ));
+        let path = std::env::temp_dir()
+            .join(format!("echi_io_v1_roundtrip_{}.json", std::process::id()));
+        save_project(&doc, &path).expect("save should succeed");
+        let loaded = load_project(&path).expect("load should succeed");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(loaded.format_version, 1);
+    }
+
+    #[test]
+    fn backward_compat_stripped_version() {
+        // Save a document, strip the format_version field, migrate, then load.
+        let mut doc = Document::new("backward-compat");
+        doc.add_feature(Feature::new(
+            FeatureId(1),
+            "Sketch1",
+            FeatureKind::Sketch {
+                sketch: Sketch::new(),
+                plane: PlaneDefinition::XY,
+            },
+        ));
+        let path = std::env::temp_dir()
+            .join(format!("echi_io_backcompat_{}.json", std::process::id()));
+        save_project(&doc, &path).expect("save should succeed");
+        let raw = std::fs::read_to_string(&path).expect("read should succeed");
+        let _ = std::fs::remove_file(&path);
+
+        // Strip the format_version line.
+        let stripped: String = raw
+            .lines()
+            .filter(|line| !line.contains("format_version"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let migrated = migrate_project(&stripped).expect("migration should succeed");
+        let loaded: Document =
+            serde_json::from_str(&migrated).expect("deserialize after migration should succeed");
+        assert_eq!(loaded.format_version, 1);
+        assert_eq!(loaded.name, "backward-compat");
+        assert_eq!(loaded.features.len(), 1);
+    }
+
+    #[test]
+    fn future_version_rejected() {
+        // format_version 99 should be rejected by migrate_project.
+        let input = r#"{"format_version":99,"name":"future-project","features":[],"parameters":[],"next_id":1}"#;
+        let err = migrate_project(input).expect_err("future version should be rejected");
+        match err {
+            ProjectError::UnsupportedVersion(msg) => {
+                assert!(msg.contains("99"), "error should mention the version number");
+            }
+            other => panic!("expected UnsupportedVersion, got {other:?}"),
         }
     }
 }

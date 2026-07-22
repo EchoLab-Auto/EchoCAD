@@ -721,9 +721,24 @@ async function refreshViewport() {
         side: THREE.DoubleSide,
         wireframe: wireframe.value,
       });
+
+      // Per-feature transparency (M19). If opacity < 1.0, make the material
+      // transparent and adjust depthWrite for correct blending. Edge overlays
+      // always stay fully opaque.
+      const opacity = store.featureOpacities[e.feature_id] ?? 1.0;
+      if (opacity < 1.0) {
+        mat.transparent = true;
+        mat.opacity = opacity;
+        mat.depthWrite = opacity >= 0.5;
+      }
+
       const mesh = new THREE.Mesh(geo, mat);
       mesh.name = e.name;
       mesh.userData = { featureId: e.feature_id };
+      // Render transparent meshes after opaque ones so they blend correctly.
+      if (opacity < 1.0) {
+        mesh.renderOrder = 1;
+      }
       ctx.value.scene.add(mesh);
       solidMeshes.push(mesh);
 

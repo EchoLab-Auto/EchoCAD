@@ -30,6 +30,10 @@ export const useSketchStore = defineStore("sketch", () => {
   /// SOLID_COLORS palette. Currently UI-only (no backend command yet).
   const featureColors = ref<Record<number, string>>({});
 
+  /// Per-feature opacity overrides keyed by FeatureId → opacity value (0.1–1.0).
+  /// Default 1.0 (fully opaque). Used by the viewport for per-body transparency.
+  const featureOpacities = ref<Record<number, number>>({});
+
   // ── Measurement mode ─────────────────────────────────────────────
   const measureMode = ref<boolean>(false);
   const measurePoints = ref<{ x: number; y: number; z: number }[]>([]);
@@ -211,6 +215,12 @@ export const useSketchStore = defineStore("sketch", () => {
     featureColors.value = { ...featureColors.value, [featureId]: hex };
   }
 
+  /// Set a per-feature opacity override. Value is clamped 0.1–1.0 by the caller.
+  /// Default 1.0 (fully opaque). UI-only — no backend persistence yet.
+  function setFeatureOpacity(featureId: number, value: number) {
+    featureOpacities.value = { ...featureOpacities.value, [featureId]: value };
+  }
+
   /// Persist a per-feature color override. Writes to the store immediately
   /// so the viewport picks up the change on the next refresh. Pass `null` to
   /// remove the override and revert to the default palette color.
@@ -233,6 +243,7 @@ export const useSketchStore = defineStore("sketch", () => {
     constraints,
     features,
     featureColors,
+    featureOpacities,
     activeFeatureId,
     editingSketchId,
     selectedFeatureId,
@@ -259,6 +270,7 @@ export const useSketchStore = defineStore("sketch", () => {
     setActivePluginTool,
     setFeatureColor,
     persistFeatureColor,
+    setFeatureOpacity,
     isEditingSketch,
     // Measurement
     measureMode,

@@ -43,6 +43,27 @@
           >↩</button>
         </div>
       </div>
+      <!-- Per-feature opacity slider (solid-producing features only).
+           Range 0.1–1.0, step 0.1, with number input. -->
+      <div v-if="isSolidFeature" class="prop-row opacity-row">
+        <label>透明度 / Opacity</label>
+        <div class="opacity-slider-wrap">
+          <input
+            type="range"
+            min="0.1" max="1.0" step="0.1"
+            :value="featureOpacity"
+            @input="onOpacityChange($event)"
+            class="opacity-slider"
+          />
+          <input
+            type="number"
+            min="0.1" max="1.0" step="0.1"
+            :value="featureOpacity"
+            @change="onOpacityChange($event)"
+            class="opacity-num-input"
+          />
+        </div>
+      </div>
       <div v-if="selectedFeature.errors" class="prop-error">
         ⚠ {{ selectedFeature.errors }}
       </div>
@@ -286,6 +307,25 @@ function onColorChange(event: Event) {
 function resetColor() {
   if (!selectedFeature.value) return;
   sketchStore.persistFeatureColor(selectedFeature.value.id, null);
+}
+
+/// Current opacity for the selected feature. Falls back to 1.0 (fully opaque).
+const featureOpacity = computed(() => {
+  if (!selectedFeature.value) return 1.0;
+  return sketchStore.featureOpacities[selectedFeature.value.id] ?? 1.0;
+});
+
+/// Called when the range slider or number input changes. Clamps to 0.1–1.0
+/// and writes into the store so the viewport picks it up on the next refresh.
+function onOpacityChange(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const val = parseFloat(input.value);
+  if (selectedFeature.value && !isNaN(val)) {
+    sketchStore.setFeatureOpacity(
+      selectedFeature.value.id,
+      Math.max(0.1, Math.min(1.0, val)),
+    );
+  }
 }
 
 const selectedEntity = computed<SketchEntity | null>(() => {
@@ -553,6 +593,26 @@ function formatParamValue(value: number): string {
 .color-reset-btn:hover {
   background: #444;
   color: #fff;
+}
+
+/* ── Opacity slider ────────────────────────────────────────────── */
+.prop-row.opacity-row {
+  align-items: center;
+}
+.opacity-slider-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+}
+.opacity-slider {
+  flex: 1 1 80px;
+  min-width: 60px;
+  width: auto;
+  accent-color: #007acc;
+}
+.opacity-num-input {
+  width: 52px !important;
 }
 
 /* ── Edge-pick section ─────────────────────────────────────────── */
