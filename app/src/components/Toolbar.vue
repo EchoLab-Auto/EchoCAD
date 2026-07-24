@@ -137,6 +137,13 @@
 
     <button
       class="tb-quick-btn"
+      :class="{ active: sketchStore.useBrep }"
+      @click="emit('toggle-brep')"
+      title="B-Rep 管线 (OCCT 精确几何)"
+    >🧩 B-Rep</button>
+
+    <button
+      class="tb-quick-btn"
       :class="{ active: sketchStore.measureMode }"
       @click="emit('toggle-measure')"
       title="测量模式"
@@ -180,6 +187,7 @@ const emit = defineEmits<{
   (e: "open-plugin", gen: GeneratorInfo): void;
   (e: "offset-plane"): void;
   (e: "clear-sketch"): void;
+  (e: "toggle-brep"): void;
   (e: "toggle-measure"): void;
 }>();
 

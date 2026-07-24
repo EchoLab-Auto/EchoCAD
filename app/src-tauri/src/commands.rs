@@ -6,7 +6,7 @@ use echi_core::{
     sketch::{Constraint, EntityId, SketchEntity, SketchPoint},
 };
 use echi_plugin::PluginRegistry;
-use echi_render::{RegenResult, RenderMesh, SolidGenerator, regenerate_with};
+use echi_render::{RegenResult, RenderMesh, SolidGenerator, regenerate_with, BrepKernel};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -68,6 +68,10 @@ pub struct AppState {
     pub(crate) undo_manager: Mutex<UndoManager>,
     pub autosave_enabled: AtomicBool,
     pub has_recovery_file: AtomicBool,
+    pub use_brep: AtomicBool,
+    /// Meshes imported from external formats (STEP, etc.) that aren't
+    /// backed by native EchoCAD features. Keyed by synthetic FeatureId.
+    pub imported_meshes: Mutex<HashMap<FeatureId, echi_geom::Mesh>>,
 }
 
 impl AppState {
@@ -94,6 +98,8 @@ impl AppState {
             undo_manager: Mutex::new(UndoManager::new()),
             autosave_enabled: AtomicBool::new(true),
             has_recovery_file: AtomicBool::new(false),
+            imported_meshes: Mutex::new(HashMap::new()),
+            use_brep: AtomicBool::new(false),
         }
     }
 
@@ -238,18 +244,55 @@ impl SolidGenerator for PluginSolidGen<'_> {
     }
 }
 
+fn brep_kernel_for_state(state: &AppState) -> Option<&'static dyn BrepKernel> {
+    #[cfg(feature = "brep")]
+    {
+        if !state.use_brep.load(Ordering::Relaxed) {
+            return None;
+        }
+        #[cfg(feature = "occt")]
+        {
+            use echi_render::OcctBrepKernel;
+            return Some(&OcctBrepKernel);
+        }
+        #[cfg(not(feature = "occt"))]
+        {
+            use echi_render::MockBrepKernel;
+            return Some(&MockBrepKernel);
+        }
+    }
+    #[cfg(not(feature = "brep"))]
+    {
+        let _ = state;
+        None
+    }
+}
+
 fn regenerate_state(state: &AppState) {
     let doc = state.lock_doc();
     let solid_gen: &dyn SolidGenerator = &PluginSolidGen(&state.plugin_registry);
-    let result = regenerate_with(&doc, Some(solid_gen));
+    let brep_kernel = brep_kernel_for_state(state);
+    let result = regenerate_with(&doc, Some(solid_gen), brep_kernel, None);
     *state.lock_regen() = result;
 }
 
-/// Regenerate from an already-locked document reference. Use this
-/// whenever the caller already holds the document Mutex to avoid deadlock.
+/// Full regeneration from an already-locked document reference.
 fn regen_locked(doc: &Document, state: &AppState) {
     let solid_gen: &dyn SolidGenerator = &PluginSolidGen(&state.plugin_registry);
-    let result = regenerate_with(doc, Some(solid_gen));
+    let brep_kernel = brep_kernel_for_state(state);
+    let result = regenerate_with(doc, Some(solid_gen), brep_kernel, None);
+    *state.lock_regen() = result;
+}
+
+/// Incremental regeneration: only re-evaluate the changed feature and its
+/// transitive dependents. Falls back to full regen if the previous result
+/// is missing or fails.
+fn incremental_regen_locked(doc: &Document, state: &AppState, changed_id: FeatureId) {
+    let solid_gen: &dyn SolidGenerator = &PluginSolidGen(&state.plugin_registry);
+    let brep_kernel = brep_kernel_for_state(state);
+    let mut prev = state.lock_regen().clone();
+    prev.dirty = RegenResult::compute_dirty(doc, changed_id);
+    let result = regenerate_with(doc, Some(solid_gen), brep_kernel, Some(&prev));
     *state.lock_regen() = result;
 }
 
@@ -472,6 +515,7 @@ pub fn add_extrude_feature(
     dist2: f64,
     draft_angle_deg: f64,
     depth: f64,
+    selected_regions: Option<Vec<usize>>,
     state: tauri::State<AppState>,
 ) -> Result<FeatureId, String> {
     let dir = match direction.as_str() {
@@ -489,6 +533,7 @@ pub fn add_extrude_feature(
             distance: param_id,
             direction: dir,
             draft_angle_deg,
+            selected_regions: selected_regions.clone(),
         }
     })
 }
@@ -650,7 +695,27 @@ pub fn update_parameter(id: ParameterId, value: f64, state: tauri::State<AppStat
     if let Some(p) = doc.get_parameter_mut(id) {
         p.value = value;
     }
-    regen_locked(&doc, &state);
+    // Incremental regen: find the owning feature and only re-evaluate it
+    let owner = doc.features.iter()
+        .find(|f| parameter_belongs_to(&f.kind, id))
+        .map(|f| f.id());
+    if let Some(fid) = owner {
+        incremental_regen_locked(&doc, &state, fid);
+    } else {
+        regen_locked(&doc, &state);
+    }
+}
+
+/// Check if a feature kind references a parameter (by ParameterId).
+fn parameter_belongs_to(kind: &FeatureKind, pid: ParameterId) -> bool {
+    match kind {
+        FeatureKind::Extrude { distance, .. } => *distance == pid,
+        FeatureKind::Revolve { angle, .. } => *angle == pid,
+        FeatureKind::Fillet { radius, .. } => *radius == pid,
+        FeatureKind::Chamfer { distance, .. } => *distance == pid,
+        FeatureKind::Shell { thickness, .. } => *thickness == pid,
+        _ => false,
+    }
 }
 
 #[tauri::command]
@@ -908,7 +973,18 @@ pub fn solve_sketch(state: tauri::State<AppState>) -> Vec<String> {
 
 #[tauri::command]
 pub fn move_point(id: EntityId, x: f64, y: f64, state: tauri::State<AppState>) {
-    state.snapshot();
+    move_point_inner(id, x, y, false, state)
+}
+
+#[tauri::command]
+pub fn move_point_no_snapshot(id: EntityId, x: f64, y: f64, state: tauri::State<AppState>) {
+    move_point_inner(id, x, y, true, state)
+}
+
+fn move_point_inner(id: EntityId, x: f64, y: f64, skip_snapshot: bool, state: tauri::State<AppState>) {
+    if !skip_snapshot {
+        state.snapshot();
+    }
     state.with_active_sketch_mut(|s| {
         if let Some(p) = s.get_point_mut(id) {
             p.x = x;
@@ -988,6 +1064,7 @@ pub fn preview_extrude(
     dist2: f64,
     draft_angle_deg: f64,
     depth: f64,
+    selected_regions: Option<Vec<usize>>,
     state: tauri::State<AppState>,
 ) -> Option<RenderMesh> {
     let doc = state.lock_doc();
@@ -1001,8 +1078,73 @@ pub fn preview_extrude(
         _ => ExtrudeDirection::OneSide,
     };
 
-    let mesh = echi_geom::extrude(sketch, if depth > 0.0 { depth } else { 1.0 }, dir, draft_angle_deg, &plane)?;
+    let h = if depth > 0.0 { depth } else { 1.0 };
+    let mesh = if let Some(ref indices) = selected_regions {
+        echi_geom::extrude::extrude_selected(sketch, h, dir, draft_angle_deg, &plane, indices)?
+    } else {
+        echi_geom::extrude(sketch, h, dir, draft_angle_deg, &plane)?
+    };
     Some(RenderMesh::from(&mesh))
+}
+
+/// Serializable region info returned to the frontend for the extrude region picker.
+/// Each region corresponds to a CLOSED LOOP (polygon) in the sketch — not a
+/// pre-classified outer+holes group. When multiple loops are selected, the
+/// extrude pipeline automatically classifies which are outers and which are
+/// holes based on containment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtrudeRegionInfo {
+    pub index: usize,
+    /// Polygon points forming the loop contour (in sketch 2D coords).
+    pub outer: Vec<(f64, f64)>,
+    /// Absolute area of the loop.
+    pub area: f64,
+}
+
+/// Return available extrude regions (closed loops) from the active sketch.
+/// Each loop is independently selectable — the extrude engine will determine
+/// outer/hole relationships at extrude time based on which loops are selected.
+#[tauri::command]
+pub fn get_extrude_regions(state: tauri::State<AppState>) -> Vec<ExtrudeRegionInfo> {
+    use echi_geom::extrude::{self, Point2D};
+
+    let doc = state.lock_doc();
+    let sketch_id = match *state.lock_sketch() {
+        Some(id) => id,
+        None => return vec![],
+    };
+    let feature = match doc.get_feature(sketch_id) {
+        Some(f) => f,
+        None => return vec![],
+    };
+    let sketch = match feature.sketch() {
+        Some(s) => s,
+        None => return vec![],
+    };
+
+    let loops = match extrude::extract_loops(sketch) {
+        Some(l) => l,
+        None => return vec![],
+    };
+
+    // Sort by area (largest first) for consistent ordering
+    let mut with_area: Vec<(usize, Vec<Point2D>, f64)> = loops
+        .into_iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let area = extrude::polygon_area(&l).abs();
+            (i, l, area)
+        })
+        .collect();
+    with_area.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+
+    with_area.into_iter().enumerate().map(|(new_idx, (_orig_idx, loop_pts, area))| {
+        ExtrudeRegionInfo {
+            index: new_idx,
+            outer: loop_pts.iter().map(|p| (p.x, p.y)).collect(),
+            area,
+        }
+    }).collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1033,6 +1175,59 @@ pub fn get_regen_errors(state: tauri::State<AppState>) -> Vec<(FeatureId, String
     let mut errors: Vec<(FeatureId, String)> = result.errors.iter().map(|(k, v)| (*k, v.clone())).collect();
     errors.sort_by_key(|(id, _)| id.0);
     errors
+}
+
+// ── B-rep toggle ────────────────────────────────────────────────
+
+/// Toggle whether regeneration uses the B-rep kernel for extrusion.
+/// When enabled, Extrude features will try the B-rep pipeline first
+/// (with graceful fallback to mesh when unsupported). Default: off.
+#[tauri::command]
+pub fn set_use_brep(value: bool, state: tauri::State<AppState>) {
+    state.use_brep.store(value, Ordering::Relaxed);
+    regenerate_state(&state);
+}
+
+/// Query whether the B-rep pipeline is currently enabled.
+#[tauri::command]
+pub fn get_use_brep(state: tauri::State<AppState>) -> bool {
+    state.use_brep.load(Ordering::Relaxed)
+}
+
+// ── Viewport capture ────────────────────────────────────────────
+
+/// Capture the current 3D viewport as a base64-encoded PNG image.
+/// Emits a `capture-viewport` event to the frontend, which renders
+/// the current frame and returns the image via `viewport-image` event.
+#[tauri::command]
+pub fn capture_viewport(window: tauri::Window) -> Result<String, String> {
+    use std::sync::mpsc;
+    use tauri::{Emitter, Listener};
+    let (tx, rx) = mpsc::channel();
+
+    // Listen for the response
+    let window_clone = window.clone();
+    let unlisten = window_clone.listen("viewport-image", move |event| {
+        let data = serde_json::from_str::<serde_json::Value>(event.payload())
+            .unwrap_or_default()
+            .get("data")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let _ = tx.send(data);
+    });
+
+    // Request capture from frontend
+    window.emit("capture-viewport", ()).map_err(|e| e.to_string())?;
+
+    // Wait for response (with timeout)
+    let result = rx.recv_timeout(std::time::Duration::from_secs(5))
+        .map_err(|_| "viewport capture timed out".to_string());
+
+    // Clean up listener
+    window.unlisten(unlisten);
+
+    result
 }
 
 // ── File IO ──────────────────────────────────────────────────────
@@ -1160,17 +1355,35 @@ pub fn clear_recent_files(app: tauri::AppHandle) -> bool {
 }
 
 #[tauri::command]
+/// Merge all solid meshes in the regen result into a single combined mesh.
+fn merge_all_export_meshes(result: &RegenResult) -> Option<echi_geom::Mesh> {
+    if result.solids.is_empty() {
+        return result.current_solid.and_then(|id| result.solids.get(&id)).cloned();
+    }
+    let mut combined = echi_geom::Mesh::default();
+    for mesh in result.solids.values() {
+        let voff = combined.vertex_count() as u32;
+        combined.positions.extend_from_slice(&mesh.positions);
+        combined.normals.extend_from_slice(&mesh.normals);
+        for &idx in &mesh.indices {
+            combined.indices.push(voff + idx);
+        }
+    }
+    Some(combined)
+}
+
+#[tauri::command]
 pub fn export_stl(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<String, String> {
     use tauri_plugin_dialog::DialogExt;
     let path = app.dialog().file().add_filter("STL", &["stl"]).blocking_save_file();
     if let Some(path) = path {
         let path = file_path_to_path(path).ok_or("Invalid file path")?;
-        let result = state.lock_regen();
-        let mesh = result.current_solid
-            .and_then(|id| result.solids.get(&id))
-            .ok_or("No solid to export")?;
+        let mesh = {
+            let result = state.lock_regen();
+            merge_all_export_meshes(&result).ok_or("No solid to export")?
+        };
         let mut file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
-        echi_io::export_stl_ascii(mesh, &mut file).map_err(|e| e.to_string())?;
+        echi_io::export_stl_ascii(&mesh, &mut file).map_err(|e| e.to_string())?;
         Ok(path.to_string_lossy().to_string())
     } else {
         Err("No file selected".into())
@@ -1183,12 +1396,12 @@ pub fn export_obj(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> R
     let path = app.dialog().file().add_filter("OBJ", &["obj"]).blocking_save_file();
     if let Some(path) = path {
         let path = file_path_to_path(path).ok_or("Invalid file path")?;
-        let result = state.lock_regen();
-        let mesh = result.current_solid
-            .and_then(|id| result.solids.get(&id))
-            .ok_or("No solid to export")?;
+        let mesh = {
+            let result = state.lock_regen();
+            merge_all_export_meshes(&result).ok_or("No solid to export")?
+        };
         let mut file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
-        echi_io::export_obj(mesh, &mut file).map_err(|e| e.to_string())?;
+        echi_io::export_obj(&mesh, &mut file).map_err(|e| e.to_string())?;
         Ok(path.to_string_lossy().to_string())
     } else {
         Err("No file selected".into())
@@ -1201,13 +1414,134 @@ pub fn export_gltf_cmd(app: tauri::AppHandle, state: tauri::State<'_, AppState>)
     let path = app.dialog().file().add_filter("glTF", &["gltf"]).blocking_save_file();
     if let Some(path) = path {
         let path = file_path_to_path(path).ok_or("Invalid file path")?;
-        let result = state.lock_regen();
-        let mesh = result.current_solid
-            .and_then(|id| result.solids.get(&id))
-            .ok_or("No solid to export")?;
+        let mesh = {
+            let result = state.lock_regen();
+            merge_all_export_meshes(&result).ok_or("No solid to export")?
+        };
         let mut file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
-        echi_io::export_gltf(mesh, &mut file).map_err(|e| e.to_string())?;
+        echi_io::export_gltf(&mesh, &mut file).map_err(|e| e.to_string())?;
         Ok(path.to_string_lossy().to_string())
+    } else {
+        Err("No file selected".into())
+    }
+}
+
+// ── STEP export (OCCT-powered) ───────────────────────────────────
+
+#[cfg(feature = "occt")]
+#[tauri::command]
+pub fn export_step(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    use cadrum::{DVec3, Solid as OcctSolid};
+    use echi_geom::extrude::extract_loops;
+    use tauri_plugin_dialog::DialogExt;
+
+    let path = app.dialog().file().add_filter("STEP", &["step", "stp"]).blocking_save_file();
+    if let Some(path) = path {
+        let path = file_path_to_path(path).ok_or("Invalid file path")?;
+        let doc = state.lock_doc();
+
+        let mut occt_solids: Vec<OcctSolid> = Vec::new();
+        for feature in doc.active_features() {
+            let extrude_data = match &feature.kind {
+                FeatureKind::Extrude { sketch_id, distance, .. } => {
+                    let height = doc.get_parameter(*distance).map(|p| p.value).unwrap_or(1.0);
+                    let sketch = doc.get_feature(*sketch_id).and_then(|f| f.sketch());
+                    (sketch, height)
+                }
+                FeatureKind::Revolve { .. } => {
+                    // Revolve not yet supported in OCCT STEP export
+                    continue;
+                }
+                _ => continue,
+            };
+
+            if let (Some(sketch), height) = extrude_data {
+                if let Some(loops) = extract_loops(sketch) {
+                    for loop_pts in loops {
+                        let points: Vec<DVec3> = loop_pts
+                            .iter()
+                            .map(|p| DVec3::new(p.x, p.y, 0.0))
+                            .collect();
+                        if let Ok(edges) = cadrum::Edge::polygon(&points) {
+                            if let Ok(solid) = OcctSolid::extrude(&edges, DVec3::new(0.0, 0.0, height)) {
+                                occt_solids.push(solid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if occt_solids.is_empty() {
+            return Err("No extruded solids to export as STEP".into());
+        }
+
+        let mut file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+        OcctSolid::write_step(&occt_solids, &mut file)
+            .map_err(|e| format!("STEP export failed: {e}"))?;
+        let count = occt_solids.len();
+        log::info!("Exported {count} solids to STEP: {}", path.display());
+        Ok(path.to_string_lossy().to_string())
+    } else {
+        Err("No file selected".into())
+    }
+}
+
+#[cfg(feature = "occt")]
+#[tauri::command]
+pub fn import_step(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<Vec<RenderMesh>, String> {
+    use cadrum::{Solid as OcctSolid, Tessellation};
+    use tauri_plugin_dialog::DialogExt;
+
+    let path = app.dialog().file().add_filter("STEP", &["step", "stp"]).blocking_pick_file();
+    if let Some(path) = path {
+        let path = file_path_to_path(path).ok_or("Invalid file path")?;
+        let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+        let solids = OcctSolid::read_step(&mut file)
+            .map_err(|e| format!("STEP import failed: {e}"))?;
+
+        let count = solids.len();
+        log::info!("Imported {count} solids from STEP: {}", path.display());
+
+        let render_meshes: Vec<RenderMesh> = solids.iter().map(|solid| {
+            let occt_mesh = OcctSolid::mesh(
+                std::iter::once(solid),
+                Tessellation { deflection_linear: 0.1, relative_linear: false, ..Default::default() },
+            ).map_err(|e| format!("tessellation failed: {e}"))?;
+            let mut mesh = echi_geom::Mesh::default();
+            for v in &occt_mesh.vertices {
+                mesh.positions.push(v.x as f32);
+                mesh.positions.push(v.y as f32);
+                mesh.positions.push(v.z as f32);
+            }
+            for n in &occt_mesh.normals {
+                mesh.normals.push(n.x as f32);
+                mesh.normals.push(n.y as f32);
+                mesh.normals.push(n.z as f32);
+            }
+            for &idx in &occt_mesh.indices {
+                mesh.indices.push(idx as u32);
+            }
+            Ok(RenderMesh::from(&mesh))
+        }).collect::<Result<Vec<_>, String>>()?;
+
+        // Store imported meshes in regen result so they appear in the viewport.
+        // Use a synthetic FeatureId range to avoid collisions with document IDs.
+        {
+            let mut result = state.lock_regen();
+            let base = FeatureId(u64::MAX - 1000);
+            for (i, rm) in render_meshes.iter().enumerate() {
+                let fid = FeatureId(base.0 - i as u64);
+                let mesh = echi_geom::Mesh {
+                    positions: rm.positions.clone(),
+                    normals: rm.normals.clone(),
+                    indices: rm.indices.iter().map(|&x| x).collect(),
+                };
+                result.solids.insert(fid, mesh);
+            }
+        }
+
+        Ok(render_meshes)
     } else {
         Err("No file selected".into())
     }
@@ -1470,6 +1804,20 @@ pub fn get_mass_properties(
     feature_id: FeatureId,
     state: tauri::State<AppState>,
 ) -> Result<MassPropertiesDto, String> {
+    #[cfg(feature = "occt")]
+    {
+        // Try OCCT exact mass properties first
+        let doc = state.lock_doc();
+        if let Some(solid) = echi_render::build_occt_solid_for_mass(&doc, feature_id) {
+            let centroid = solid.center();
+            return Ok(MassPropertiesDto {
+                volume: solid.volume(),
+                surface_area: solid.area(),
+                centroid: [centroid.x, centroid.y, centroid.z],
+            });
+        }
+    }
+
     let result = state.lock_regen();
     let mesh = result.solids.get(&feature_id).ok_or("feature has no solid mesh")?;
     let props = echi_geom::compute_mass_properties(mesh).ok_or("empty mesh")?;
@@ -1509,12 +1857,11 @@ pub fn update_linear_pattern(
         }
         _ => return Err("feature is not a LinearPattern".into()),
     }
-    regen_locked(&doc, &state);
+    incremental_regen_locked(&doc, &state, feature_id);
     Ok(())
 }
 
 /// Update the parameters of an existing CircularPattern feature.
-/// This is a document mutation — snapshot + regen.
 #[tauri::command]
 pub fn update_circular_pattern(
     feature_id: FeatureId,
@@ -1541,12 +1888,11 @@ pub fn update_circular_pattern(
         }
         _ => return Err("feature is not a CircularPattern".into()),
     }
-    regen_locked(&doc, &state);
+    incremental_regen_locked(&doc, &state, feature_id);
     Ok(())
 }
 
 /// Update the mirror plane parameters of an existing Mirror feature.
-/// This is a document mutation — snapshot + regen.
 #[tauri::command]
 pub fn update_mirror_params(
     feature_id: FeatureId,
@@ -1571,6 +1917,6 @@ pub fn update_mirror_params(
         }
         _ => return Err("feature is not a Mirror".into()),
     }
-    regen_locked(&doc, &state);
+    incremental_regen_locked(&doc, &state, feature_id);
     Ok(())
 }

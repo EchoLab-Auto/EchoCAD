@@ -95,6 +95,7 @@ mod tests {
                 distance: ParameterId(1),
                 direction: ExtrudeDirection::OneSide,
                 draft_angle_deg: 0.0,
+                selected_regions: None,
             },
         ));
 

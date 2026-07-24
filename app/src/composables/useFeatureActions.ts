@@ -3,7 +3,7 @@ import { useSketchStore } from "@/stores/sketch";
 import { useToastStore } from "@/stores/toast";
 import {
   getFeatures, getSketchEntities,
-  previewExtrude, addExtrudeFeature,
+  previewExtrude, addExtrudeFeature, getExtrudeRegions,
   addRevolveFeature,
   addFilletEdgesFeature, addChamferEdgesFeature,
   addLinearPattern as addLinearPatternCmd,
@@ -11,7 +11,7 @@ import {
   addMirrorFeature, addSweepFeature, addShellFeature,
   addBooleanFeature as addBooleanFeatureCmd,
 } from "@/commands/sketch";
-import type { FeatureId, FeatureNode } from "@/commands/sketch";
+import type { FeatureId, FeatureNode, ExtrudeRegionInfo } from "@/commands/sketch";
 import type { FeatureKind, PatternKind } from "@/components/Toolbar.vue";
 import type { BooleanTargets, BooleanResult } from "@/components/BooleanDialog.vue";
 import type UnifiedViewport from "@/components/UnifiedViewport.vue";
@@ -102,10 +102,19 @@ export function useFeatureActions(
 
   // ── Extrude ──────────────────────────────────────────────────────
 
+  /// Available extrude regions from the active sketch.
+  const extrudeRegions = ref<ExtrudeRegionInfo[]>([]);
+
   async function showExtrudePanel() {
     if (activeSketchForFeature() === null) {
       toastStore.info("请先选择一个草图");
       return;
+    }
+    // Fetch available regions for the region picker
+    try {
+      extrudeRegions.value = await getExtrudeRegions();
+    } catch {
+      extrudeRegions.value = [];
     }
     sketchStore.showExtrudePanel = true;
     updateExtrudePreview(sketchStore.extrudeConfig);
@@ -117,10 +126,14 @@ export function useFeatureActions(
     extrudePreviewTimer = setTimeout(() => updateExtrudePreview(config), 120);
   }
 
+  /// Currently selected region indices for the active extrude preview.
+  const selectedPreviewRegions = ref<number[] | null>(null);
+
   async function updateExtrudePreview(cfg: { direction: string; depth: number; dist2: number; draft: number }) {
     const activeId = activeSketchForFeature();
     if (activeId === null) return;
-    const mesh = await previewExtrude(activeId, cfg.direction, cfg.dist2, cfg.draft, cfg.depth);
+    const mesh = await previewExtrude(activeId, cfg.direction, cfg.dist2, cfg.draft, cfg.depth,
+      selectedPreviewRegions.value);
     if (mesh) {
       unifiedViewport.value?.showPreviewMesh(mesh);
     }
@@ -130,17 +143,19 @@ export function useFeatureActions(
     if (extrudePreviewTimer) clearTimeout(extrudePreviewTimer);
     sketchStore.showExtrudePanel = false;
     unifiedViewport.value?.clearPreviewMesh();
+    extrudeRegions.value = [];
   }
 
-  async function doExtrude() {
+  async function doExtrude(selectedRegions: number[] | null = null) {
     const activeId = activeSketchForFeature();
     if (activeId === null) return;
     const cfg = sketchStore.extrudeConfig;
     if (extrudePreviewTimer) clearTimeout(extrudePreviewTimer);
     sketchStore.showExtrudePanel = false;
     unifiedViewport.value?.clearPreviewMesh();
+    extrudeRegions.value = [];
     try {
-      await addExtrudeFeature(activeId, cfg.direction, cfg.dist2, cfg.draft, cfg.depth);
+      await addExtrudeFeature(activeId, cfg.direction, cfg.dist2, cfg.draft, cfg.depth, selectedRegions);
       await loadState();
       await unifiedViewport.value?.refreshViewport();
       toastStore.success("拉伸特征已创建");
@@ -328,6 +343,8 @@ export function useFeatureActions(
     cancelExtrude,
     onExtrudeConfigChange,
     showExtrudePanel,
+    extrudeRegions,
+    selectedPreviewRegions,
     // feature creation
     revolve,
     addFillet,

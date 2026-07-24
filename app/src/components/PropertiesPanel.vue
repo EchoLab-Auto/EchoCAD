@@ -9,8 +9,9 @@
       :depth="sketchStore.extrudeConfig.depth"
       :dist2="sketchStore.extrudeConfig.dist2"
       :draft="sketchStore.extrudeConfig.draft"
+      :regions="regions"
       @change="onExtrudeConfigChange"
-      @confirm="emit('extrude-confirm')"
+      @confirm="(sel: number[] | null) => emit('extrude-confirm', sel)"
       @cancel="emit('extrude-cancel')"
     />
 
@@ -23,8 +24,7 @@
           @change="emit('rename', ($event.target as HTMLInputElement).value)" />
       </div>
       <!-- Per-feature color picker (solid-producing features only).
-           TODO: add backend command to persist feature color.
-           Currently stored in sketchStore.featureColors (UI-only). -->
+           Persisted to backend via set_feature_color command. -->
       <div v-if="isSolidFeature" class="prop-row color-row">
         <label>颜色</label>
         <div class="color-picker-wrap">
@@ -227,6 +227,7 @@
 import { ref, computed } from "vue";
 import ExtrudePanel from "@/components/ExtrudePanel.vue";
 import { useSketchStore } from "@/stores/sketch";
+import type { ExtrudeRegionInfo } from "@/commands/sketch";
 import type {
   Constraint,
   EntityId,
@@ -237,6 +238,10 @@ import type {
 
 type ExtrudeConfig = { direction: string; depth: number; dist2: number; draft: number };
 
+defineProps<{
+  regions: ExtrudeRegionInfo[];
+}>();
+
 const emit = defineEmits<{
   (e: "rename", name: string): void;
   (e: "update-param", id: ParameterId, event: Event): void;
@@ -246,7 +251,7 @@ const emit = defineEmits<{
   (e: "delete-constraint", index: number): void;
   (e: "clear-constraints"): void;
   (e: "extrude-change", config: ExtrudeConfig): void;
-  (e: "extrude-confirm"): void;
+  (e: "extrude-confirm", selectedRegions: number[] | null): void;
   (e: "extrude-cancel"): void;
   (e: "enter-edge-pick"): void;
   (e: "exit-edge-pick"): void;
@@ -279,17 +284,35 @@ const isSolidFeature = computed(() => {
   return ft !== "Sketch" && !ft.startsWith("Custom:");
 });
 
-/// Current hex color for the selected feature. Falls back to "#cccccc"
-/// (default gray) when not set.
+/// Palette colors used in the viewport for auto-assigned colors.
+const SOLID_COLORS = [0x4fc3f7, 0xff8a65, 0x69f0ae, 0xffd54f, 0xce93d8, 0x80cbc4, 0xf48fb1, 0xaed581, 0xfff176, 0x90caf9];
+
+/// Compute a stable palette color from a feature's position in the feature list.
+function paletteColorForIndex(index: number): string {
+  const c = SOLID_COLORS[index % SOLID_COLORS.length];
+  return "#" + c.toString(16).padStart(6, "0");
+}
+
+/// Effective hex color for the selected feature.
+/// Priority: store override → backend FeatureNode.color → palette index → "#cccccc"
 const featureColorHex = computed(() => {
   if (!selectedFeature.value) return "#cccccc";
-  return sketchStore.featureColors[selectedFeature.value.id] ?? "#cccccc";
+  const fid = selectedFeature.value.id;
+  // 1. Local store override (UI-only, not yet persisted)
+  if (fid in sketchStore.featureColors) return sketchStore.featureColors[fid];
+  // 2. Backend-persisted color
+  if (selectedFeature.value.color) return selectedFeature.value.color;
+  // 3. Palette color based on position in feature list
+  const idx = sketchStore.features.findIndex(f => f.id === fid);
+  if (idx >= 0) return paletteColorForIndex(idx);
+  return "#cccccc";
 });
 
-/// Whether this feature has a custom color set in the store.
+/// Whether this feature has a custom color override.
 const hasCustomColor = computed(() => {
   if (!selectedFeature.value) return false;
-  return selectedFeature.value.id in sketchStore.featureColors;
+  const fid = selectedFeature.value.id;
+  return (fid in sketchStore.featureColors) || (selectedFeature.value.color != null);
 });
 
 /// Called when the native color input changes. Stores the selected color

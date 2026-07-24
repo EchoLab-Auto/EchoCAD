@@ -8,6 +8,7 @@ members = [
     "crates/echi-plugin",
     "crates/echi-plugin-gear",
     "crates/echi-plugin-cycloidal",
+    "crates/echi-brep",
     "app/src-tauri",
 ]
 

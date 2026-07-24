@@ -42,21 +42,70 @@ pub fn extrude(
     draft_angle_deg: f64,
     plane: &PlaneDefinition,
 ) -> Option<Mesh> {
-    let polygons = extract_loops(sketch)?;
-    if polygons.is_empty() || height.abs() < 1e-10 {
+    extrude_inner(sketch, height, direction, draft_angle_deg, plane, None)
+}
+
+/// Like [`extrude`] but only extrudes the regions at the given indices.
+/// Indices correspond to those returned by the frontend region picker.
+/// `None` for `selected_regions` extrudes all regions.
+pub fn extrude_selected(
+    sketch: &Sketch,
+    height: f64,
+    direction: ExtrudeDirection,
+    draft_angle_deg: f64,
+    plane: &PlaneDefinition,
+    selected_regions: &[usize],
+) -> Option<Mesh> {
+    extrude_inner(sketch, height, direction, draft_angle_deg, plane, Some(selected_regions))
+}
+
+fn extrude_inner(
+    sketch: &Sketch,
+    height: f64,
+    direction: ExtrudeDirection,
+    draft_angle_deg: f64,
+    plane: &PlaneDefinition,
+    selected_regions: Option<&[usize]>,
+) -> Option<Mesh> {
+    let mut loops = extract_loops(sketch)?;
+    if loops.is_empty() || height.abs() < 1e-10 {
         return None;
     }
+
+    // When specific loop indices are selected, filter to just those loops.
+    // Indices correspond to the sorted-by-area order returned by get_extrude_regions.
+    // extrude_loops will classify them as outer/hole at extrude time.
+    if let Some(indices) = selected_regions {
+        let mut indexed: Vec<(Vec<Point2D>, f64)> = loops
+            .into_iter()
+            .map(|l| {
+                let area = polygon_area(&l).abs();
+                (l, area)
+            })
+            .collect();
+        // Sort by area descending (largest first) — must match get_extrude_regions
+        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        loops = indices.iter()
+            .filter_map(|&idx| indexed.get(idx).map(|(pts, _)| pts.clone()))
+            .collect();
+
+        if loops.is_empty() {
+            return None;
+        }
+    }
+
     let mut mesh = match direction {
-        ExtrudeDirection::OneSide => extrude_loops(&polygons, height, 0.0, draft_angle_deg)?,
+        ExtrudeDirection::OneSide => extrude_loops(&loops, height, 0.0, draft_angle_deg)?,
         ExtrudeDirection::Midplane => {
             let half = height / 2.0;
-            let lower = extrude_loops(&polygons, half, -half, draft_angle_deg)?;
-            let upper = extrude_loops(&polygons, half, 0.0, -draft_angle_deg)?;
+            let lower = extrude_loops(&loops, half, -half, draft_angle_deg)?;
+            let upper = extrude_loops(&loops, half, 0.0, -draft_angle_deg)?;
             merge_mesh_pair(lower, upper)
         }
         ExtrudeDirection::TwoSides { dist1, dist2 } => {
-            let lower = extrude_loops(&polygons, dist1, -dist1, draft_angle_deg)?;
-            let upper = extrude_loops(&polygons, dist2, 0.0, -draft_angle_deg)?;
+            let lower = extrude_loops(&loops, dist1, -dist1, draft_angle_deg)?;
+            let upper = extrude_loops(&loops, dist2, 0.0, -draft_angle_deg)?;
             merge_mesh_pair(lower, upper)
         }
     };
@@ -66,15 +115,19 @@ pub fn extrude(
 
 /// Extrude a list of loops (one outer + zero or more holes) into a single mesh.
 /// `z_min` is the bottom-Z of the extrusion; height is added to it.
-fn extrude_loops(loops: &[Vec<Point2D>], height: f64, z_min: f64, draft_angle_deg: f64) -> Option<Mesh> {
+pub fn extrude_loops(loops: &[Vec<Point2D>], height: f64, z_min: f64, draft_angle_deg: f64) -> Option<Mesh> {
     if loops.is_empty() || height.abs() < 1e-10 {
         return None;
     }
 
-    // Determine outer vs holes: the largest-area loop is the outer; everything
-    // else is a hole. We enforce outer = CCW and holes = CW for the
-    // triangulator, regardless of how they were drawn.
-    let mut classified: Vec<(Vec<Point2D>, f64)> = loops
+    // Classify loops: largest-area loops are candidate outers; a smaller loop
+    // is a hole if its centroid lies inside a larger loop. Loops that are not
+    // contained in any larger loop are their own outers. This correctly handles
+    // concentric circles (outer + hole), separate circles (two outers), and
+    // mixed geometry like a rectangle with circular holes.
+    //
+    // We enforce outer = CCW and holes = CW for the triangulator.
+    let mut classified: Vec<(Vec<Point2D>, f64, Point2D)> = loops
         .iter()
         .map(|l| {
             let area = polygon_area(l);
@@ -83,19 +136,55 @@ fn extrude_loops(loops: &[Vec<Point2D>], height: f64, z_min: f64, draft_angle_de
             if !ccw {
                 l.reverse();
             }
-            (l, area.abs())
+            let centroid = polygon_centroid(&l);
+            (l, area.abs(), centroid)
         })
         .collect();
     classified.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let (outer, _) = classified.remove(0);
-    let holes: Vec<Vec<Point2D>> = classified.into_iter().map(|(l, _)| {
-        // Holes should be CW so the ear-clipping with holes can detect them.
-        let mut h = l.clone();
-        h.reverse();
-        h
-    }).collect();
 
-    extrude_with_holes(&outer, &holes, height, z_min, draft_angle_deg)
+    // Group loops: each outer gets its contained holes.
+    let mut outers: Vec<Vec<Point2D>> = Vec::new();
+    let mut hole_groups: Vec<Vec<Vec<Point2D>>> = Vec::new();
+
+    for (i, (_loop_pts, _area, centroid)) in classified.iter().enumerate() {
+        // Check if this loop is contained inside any already-registered outer.
+        let mut is_hole_of: Option<usize> = None;
+        for (j, outer_pts) in outers.iter().enumerate() {
+            if point_in_polygon(centroid, outer_pts) {
+                is_hole_of = Some(j);
+                break;
+            }
+        }
+        if let Some(outer_idx) = is_hole_of {
+            // Reverse to CW for hole convention
+            let mut h = classified[i].0.clone();
+            h.reverse();
+            hole_groups[outer_idx].push(h);
+        } else {
+            outers.push(classified[i].0.clone());
+            hole_groups.push(Vec::new());
+        }
+    }
+
+    // Extrude each outer+holes group and combine into a single mesh.
+    let mut combined = Mesh::default();
+    for (i, outer) in outers.iter().enumerate() {
+        let holes = &hole_groups[i];
+        if let Some(mesh) = extrude_with_holes(outer, holes, height, z_min, draft_angle_deg) {
+            let voff = combined.vertex_count() as u32;
+            combined.positions.extend_from_slice(&mesh.positions);
+            combined.normals.extend_from_slice(&mesh.normals);
+            for &idx in &mesh.indices {
+                combined.indices.push(voff + idx);
+            }
+        }
+    }
+
+    if combined.vertex_count() == 0 {
+        None
+    } else {
+        Some(combined)
+    }
 }
 
 /// Extrude an outer polygon with optional holes. Uses even-odd rule during
@@ -410,7 +499,7 @@ fn ear_clip_indexed(points: &[Point2D], polygon: &[usize]) -> Vec<[usize; 3]> {
 }
 
 /// Transform a mesh from local sketch coordinates to world coordinates.
-fn transform_mesh_to_world(mesh: &mut Mesh, plane: &PlaneDefinition) {
+pub fn transform_mesh_to_world(mesh: &mut Mesh, plane: &PlaneDefinition) {
     if matches!(plane, PlaneDefinition::XY) {
         return;
     }
@@ -469,7 +558,7 @@ fn merge_mesh_pair(a: Mesh, b: Mesh) -> Mesh {
 
 /// Compute polygon area using the shoelace formula.
 /// Positive => CCW, negative => CW.
-fn polygon_area(polygon: &[Point2D]) -> f64 {
+pub fn polygon_area(polygon: &[Point2D]) -> f64 {
     let n = polygon.len();
     let mut area = 0.0;
     for i in 0..n {
@@ -478,6 +567,59 @@ fn polygon_area(polygon: &[Point2D]) -> f64 {
         area -= polygon[j].x * polygon[i].y;
     }
     area / 2.0
+}
+
+/// Compute the centroid of a polygon using the shoelace-based formula.
+pub fn polygon_centroid(polygon: &[Point2D]) -> Point2D {
+    let n = polygon.len();
+    if n == 0 {
+        return Point2D { x: 0.0, y: 0.0 };
+    }
+    let mut cx = 0.0;
+    let mut cy = 0.0;
+    let mut area = 0.0;
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let cross = polygon[i].x * polygon[j].y - polygon[j].x * polygon[i].y;
+        area += cross;
+        cx += (polygon[i].x + polygon[j].x) * cross;
+        cy += (polygon[i].y + polygon[j].y) * cross;
+    }
+    area *= 0.5;
+    if area.abs() < 1e-12 {
+        // Degenerate polygon — fall back to average of vertices
+        let sum_x: f64 = polygon.iter().map(|p| p.x).sum();
+        let sum_y: f64 = polygon.iter().map(|p| p.y).sum();
+        return Point2D { x: sum_x / n as f64, y: sum_y / n as f64 };
+    }
+    Point2D {
+        x: cx / (6.0 * area),
+        y: cy / (6.0 * area),
+    }
+}
+
+/// Ray-casting point-in-polygon test. Returns true if the point is inside
+/// or on the boundary of the polygon.
+pub fn point_in_polygon(point: &Point2D, polygon: &[Point2D]) -> bool {
+    let n = polygon.len();
+    if n < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let yi = polygon[i].y;
+        let yj = polygon[j].y;
+        if (yi > point.y) != (yj > point.y) {
+            let intersect_x = polygon[i].x
+                + (point.y - yi) * (polygon[j].x - polygon[i].x) / (yj - yi);
+            if point.x < intersect_x {
+                inside = !inside;
+            }
+        }
+        j = i;
+    }
+    inside
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -669,6 +811,8 @@ pub fn extract_loops(sketch: &Sketch) -> Option<Vec<Vec<Point2D>>> {
     let mut entity_ids: Vec<EntityId> = sketch.entities.keys().copied().collect();
     entity_ids.sort_unstable_by_key(|e| e.0);
     let mut edges: Vec<EdgeRef> = Vec::new();
+    // Standalone circles are tessellated directly into completed polygon loops.
+    let mut loops: Vec<Vec<Point2D>> = Vec::new();
     for id in entity_ids {
         let entity = match sketch.entities.get(&id) {
             Some(e) => e,
@@ -726,6 +870,20 @@ pub fn extract_loops(sketch: &Sketch) -> Option<Vec<Vec<Point2D>>> {
                     });
                 }
             }
+            SketchEntity::Circle { center, radius, construction } if !*construction => {
+                if let Some(cp) = sketch.get_point(*center) {
+                    let n_seg = 64;
+                    let mut polygon: Vec<Point2D> = Vec::with_capacity(n_seg + 1);
+                    for i in 0..=n_seg {
+                        let a = 2.0 * std::f64::consts::PI * i as f64 / n_seg as f64;
+                        polygon.push(Point2D {
+                            x: cp.x + radius * a.cos(),
+                            y: cp.y + radius * a.sin(),
+                        });
+                    }
+                    loops.push(polygon);
+                }
+            }
             SketchEntity::Spline { control_points, construction } if !*construction => {
                 for w in control_points.windows(2) {
                     edges.push(EdgeRef {
@@ -740,8 +898,10 @@ pub fn extract_loops(sketch: &Sketch) -> Option<Vec<Vec<Point2D>>> {
         }
     }
 
+    // If we have directly-tessellated circles but no edges, we already have
+    // complete loops and can skip the edge-walking phase.
     if edges.is_empty() {
-        return None;
+        return if loops.is_empty() { None } else { Some(loops) };
     }
 
     // Build adjacency: point_id → list of (other_point, edge_index)
@@ -753,7 +913,6 @@ pub fn extract_loops(sketch: &Sketch) -> Option<Vec<Vec<Point2D>>> {
 
     // Find every closed loop by repeatedly walking until we exhaust edges.
     let mut used_edges = vec![false; edges.len()];
-    let mut loops: Vec<Vec<Point2D>> = Vec::new();
 
     while let Some(start_edge_idx) = used_edges.iter().position(|&u| !u) {
         let start_point = edges[start_edge_idx].a;

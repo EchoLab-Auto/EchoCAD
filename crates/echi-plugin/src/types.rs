@@ -10,8 +10,25 @@ pub enum PluginError {
     Generic(String),
     #[error("Parameter missing: {0}")]
     MissingParameter(String),
-    #[error("Invalid parameter: {0}")]
-    InvalidParameter(String),
+    #[error("Invalid parameter: {reason}")]
+    InvalidParameter { name: String, reason: String },
+    #[error("Geometry error: {0}")]
+    Geometry(String),
+    #[error("Generator '{0}' not found")]
+    GeneratorNotFound(String),
+    #[error("Operation not supported: {0}")]
+    Unsupported(String),
+}
+
+impl PluginError {
+    /// Convenience: create an `InvalidParameter` error with a combined message.
+    /// For backward compatibility when callers pass a single string.
+    pub fn invalid_param(reason: impl Into<String>) -> Self {
+        PluginError::InvalidParameter {
+            name: String::new(),
+            reason: reason.into(),
+        }
+    }
 }
 
 /// Describes a parameter accepted by a feature generator.

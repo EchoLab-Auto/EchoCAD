@@ -1,25 +1,23 @@
 [package]
-name = "echi-render"
+name = "echi-brep"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+description = "EchoCAD boundary-representation kernel abstraction"
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
-echi-core = { path = "../echi-core" }
 echi-geom = { path = "../echi-geom" }
-echi-brep = { path = "../echi-brep" }
 cadrum = { version = "0.8", optional = true }
 
 [features]
-brep = []
-occt = ["brep", "echi-brep/occt", "cadrum"]
+occt = ["cadrum"]
 
 [dev-dependencies]
 insta = "1"

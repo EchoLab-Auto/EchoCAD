@@ -15,8 +15,9 @@ use commands::{
     clear_document, clear_recent_files, clear_sketch, delete_feature,
     export_obj, export_stl, export_gltf_cmd, check_recovery, generate_plugin_feature, get_features, get_recent_files,
     get_regen_errors, get_all_solid_meshes, get_sketch_entities, get_sketch_constraints,
-    get_solid_mesh, load_project_from, preview_extrude, list_generators, list_plugins,
-    load_project_cmd, move_point, remove_constraint, save_project_cmd, save_project_to,
+    set_use_brep, get_use_brep, capture_viewport,
+    get_solid_mesh, get_extrude_regions, load_project_from, preview_extrude, list_generators, list_plugins,
+    load_project_cmd, move_point, move_point_no_snapshot, remove_constraint, save_project_cmd, save_project_to,
     set_active_sketch, solve_sketch, undo, redo, can_undo_redo, update_constraint_value,
     update_entity_prop, delete_entity, update_parameter, rename_feature,
     set_feature_suppressed, set_feature_color,
@@ -24,6 +25,8 @@ use commands::{
     update_linear_pattern, update_circular_pattern, update_mirror_params,
     AppState,
 };
+#[cfg(feature = "occt")]
+use commands::{export_step, import_step};
 
 #[allow(unused_imports)]
 use tauri::Manager;
@@ -53,7 +56,20 @@ fn main() {
                 if let Ok(dir) = _app.path().app_config_dir() {
                     let autosave_path = dir.join("autosave.echi");
                     if autosave_path.exists() {
-                        if let Ok(meta) = std::fs::metadata(&autosave_path) {
+                        // Validate file integrity before offering recovery
+                        let is_valid = std::fs::read(&autosave_path)
+                            .ok()
+                            .and_then(|bytes| serde_json::from_slice::<echi_core::Document>(&bytes).ok())
+                            .is_some();
+                        if !is_valid {
+                            // Corrupted autosave — try the temp file, then clean up
+                            let tmp_path = dir.join("autosave.echi.tmp");
+                            if tmp_path.exists() {
+                                let _ = std::fs::rename(&tmp_path, &autosave_path);
+                            } else {
+                                let _ = std::fs::remove_file(&autosave_path);
+                            }
+                        } else if let Ok(meta) = std::fs::metadata(&autosave_path) {
                             if let Ok(mtime) = meta.modified() {
                                 let recent_path = dir.join("recent_files.json");
                                 let autosave_is_newer = std::fs::read(&recent_path)
@@ -80,6 +96,7 @@ fn main() {
             // Spawn autosave background thread (writes the document to
             // autosave.echi every 30 seconds). Only locks the document, so
             // it respects the lock-doc → lock-sketch ordering invariant.
+            // Writes are atomic (tmp + rename) to prevent corruption on crash.
             let app_handle = _app.handle().clone();
             std::thread::spawn(move || {
                 loop {
@@ -94,9 +111,19 @@ fn main() {
                     };
                     let _ = std::fs::create_dir_all(&dir);
                     let path = dir.join("autosave.echi");
-                    let doc = state.lock_doc();
-                    if let Err(e) = echi_io::save_project(&*doc, &path) {
-                        log::error!("Autosave failed: {}", e);
+                    let tmp_path = dir.join("autosave.echi.tmp");
+                    // Serialize under the lock, then drop it before disk I/O
+                    let data = {
+                        let doc = state.lock_doc();
+                        serde_json::to_vec(&*doc).ok()
+                    };
+                    if let Some(data) = data {
+                        if let Err(e) = std::fs::write(&tmp_path, &data)
+                            .and_then(|_| std::fs::rename(&tmp_path, &path))
+                        {
+                            log::error!("Autosave failed: {}", e);
+                            let _ = std::fs::remove_file(&tmp_path);
+                        }
                     }
                 }
             });
@@ -127,6 +154,7 @@ fn main() {
             set_feature_color,
             delete_feature,
             get_sketch_entities,
+            get_extrude_regions,
             get_sketch_constraints,
             remove_constraint,
             add_point,
@@ -141,11 +169,15 @@ fn main() {
             update_entity_prop,
             delete_entity,
             move_point,
+            move_point_no_snapshot,
             clear_sketch,
             get_solid_mesh,
             preview_extrude,
             get_all_solid_meshes,
             get_regen_errors,
+            set_use_brep,
+            get_use_brep,
+            capture_viewport,
             clear_document,
             save_project_cmd,
             save_project_to,
@@ -156,6 +188,8 @@ fn main() {
             export_stl,
             export_obj,
             export_gltf_cmd,
+            #[cfg(feature = "occt")] export_step,
+            #[cfg(feature = "occt")] import_step,
             check_recovery,
             list_plugins,
             list_generators,

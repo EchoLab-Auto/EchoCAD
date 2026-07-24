@@ -1,0 +1,377 @@
+---
+source: crates/echi-brep/src/mock.rs
+assertion_line: 622
+expression: solid
+---
+Solid {
+    faces: [
+        Face {
+            surface: Plane {
+                origin: [
+                    0.0,
+                    0.0,
+                    0.0,
+                ],
+                normal: [
+                    0.0,
+                    0.0,
+                    -1.0,
+                ],
+                u_dir: [
+                    1.0,
+                    0.0,
+                    0.0,
+                ],
+            },
+            outer_wire: Wire {
+                edges: [
+                    WireEdge {
+                        edge_idx: 0,
+                        forward: true,
+                    },
+                    WireEdge {
+                        edge_idx: 1,
+                        forward: true,
+                    },
+                    WireEdge {
+                        edge_idx: 2,
+                        forward: true,
+                    },
+                    WireEdge {
+                        edge_idx: 3,
+                        forward: true,
+                    },
+                ],
+            },
+            inner_wires: [],
+        },
+        Face {
+            surface: Plane {
+                origin: [
+                    0.0,
+                    0.0,
+                    1.0,
+                ],
+                normal: [
+                    0.0,
+                    0.0,
+                    1.0,
+                ],
+                u_dir: [
+                    1.0,
+                    0.0,
+                    0.0,
+                ],
+            },
+            outer_wire: Wire {
+                edges: [
+                    WireEdge {
+                        edge_idx: 4,
+                        forward: true,
+                    },
+                    WireEdge {
+                        edge_idx: 5,
+                        forward: true,
+                    },
+                    WireEdge {
+                        edge_idx: 6,
+                        forward: true,
+                    },
+                    WireEdge {
+                        edge_idx: 7,
+                        forward: true,
+                    },
+                ],
+            },
+            inner_wires: [],
+        },
+        Face {
+            surface: Plane {
+                origin: [
+                    0.0,
+                    0.0,
+                    0.0,
+                ],
+                normal: [
+                    0.0,
+                    -1.0,
+                    0.0,
+                ],
+                u_dir: [
+                    1.0,
+                    0.0,
+                    0.0,
+                ],
+            },
+            outer_wire: Wire {
+                edges: [
+                    WireEdge {
+                        edge_idx: 0,
+                        forward: true,
+                    },
+                    WireEdge {
+                        edge_idx: 9,
+                        forward: true,
+                    },
+                    WireEdge {
+                        edge_idx: 4,
+                        forward: false,
+                    },
+                    WireEdge {
+                        edge_idx: 8,
+                        forward: false,
+                    },
+                ],
+            },
+            inner_wires: [],
+        },
+        Face {
+            surface: Plane {
+                origin: [
+                    1.0,
+                    0.0,
+                    0.0,
+                ],
+                normal: [
+                    1.0,
+                    -0.0,
+                    0.0,
+                ],
+                u_dir: [
+                    0.0,
+                    1.0,
+                    0.0,
+                ],
+            },
+            outer_wire: Wire {
+                edges: [
+                    WireEdge {
+                        edge_idx: 1,
+                        forward: true,
+                    },
+                    WireEdge {
+                        edge_idx: 10,
+                        forward: true,
+                    },
+                    WireEdge {
+                        edge_idx: 5,
+                        forward: false,
+                    },
+                    WireEdge {
+                        edge_idx: 9,
+                        forward: false,
+                    },
+                ],
+            },
+            inner_wires: [],
+        },
+        Face {
+            surface: Plane {
+                origin: [
+                    1.0,
+                    1.0,
+                    0.0,
+                ],
+                normal: [
+                    0.0,
+                    1.0,
+                    0.0,
+                ],
+                u_dir: [
+                    -1.0,
+                    0.0,
+                    0.0,
+                ],
+            },
+            outer_wire: Wire {
+                edges: [
+                    WireEdge {
+                        edge_idx: 2,
+                        forward: true,
+                    },
+                    WireEdge {
+                        edge_idx: 11,
+                        forward: true,
+                    },
+                    WireEdge {
+                        edge_idx: 6,
+                        forward: false,
+                    },
+                    WireEdge {
+                        edge_idx: 10,
+                        forward: false,
+                    },
+                ],
+            },
+            inner_wires: [],
+        },
+        Face {
+            surface: Plane {
+                origin: [
+                    0.0,
+                    1.0,
+                    0.0,
+                ],
+                normal: [
+                    -1.0,
+                    -0.0,
+                    0.0,
+                ],
+                u_dir: [
+                    0.0,
+                    -1.0,
+                    0.0,
+                ],
+            },
+            outer_wire: Wire {
+                edges: [
+                    WireEdge {
+                        edge_idx: 3,
+                        forward: true,
+                    },
+                    WireEdge {
+                        edge_idx: 8,
+                        forward: true,
+                    },
+                    WireEdge {
+                        edge_idx: 7,
+                        forward: false,
+                    },
+                    WireEdge {
+                        edge_idx: 11,
+                        forward: false,
+                    },
+                ],
+            },
+            inner_wires: [],
+        },
+    ],
+    edges: [
+        Edge {
+            curve: Line,
+            vertices: (
+                0,
+                1,
+            ),
+        },
+        Edge {
+            curve: Line,
+            vertices: (
+                1,
+                2,
+            ),
+        },
+        Edge {
+            curve: Line,
+            vertices: (
+                2,
+                3,
+            ),
+        },
+        Edge {
+            curve: Line,
+            vertices: (
+                3,
+                0,
+            ),
+        },
+        Edge {
+            curve: Line,
+            vertices: (
+                4,
+                5,
+            ),
+        },
+        Edge {
+            curve: Line,
+            vertices: (
+                5,
+                6,
+            ),
+        },
+        Edge {
+            curve: Line,
+            vertices: (
+                6,
+                7,
+            ),
+        },
+        Edge {
+            curve: Line,
+            vertices: (
+                7,
+                4,
+            ),
+        },
+        Edge {
+            curve: Line,
+            vertices: (
+                0,
+                4,
+            ),
+        },
+        Edge {
+            curve: Line,
+            vertices: (
+                1,
+                5,
+            ),
+        },
+        Edge {
+            curve: Line,
+            vertices: (
+                2,
+                6,
+            ),
+        },
+        Edge {
+            curve: Line,
+            vertices: (
+                3,
+                7,
+            ),
+        },
+    ],
+    vertices: [
+        Vertex {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        Vertex {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        Vertex {
+            x: 1.0,
+            y: 1.0,
+            z: 0.0,
+        },
+        Vertex {
+            x: 0.0,
+            y: 1.0,
+            z: 0.0,
+        },
+        Vertex {
+            x: 0.0,
+            y: 0.0,
+            z: 1.0,
+        },
+        Vertex {
+            x: 1.0,
+            y: 0.0,
+            z: 1.0,
+        },
+        Vertex {
+            x: 1.0,
+            y: 1.0,
+            z: 1.0,
+        },
+        Vertex {
+            x: 0.0,
+            y: 1.0,
+            z: 1.0,
+        },
+    ],
+}

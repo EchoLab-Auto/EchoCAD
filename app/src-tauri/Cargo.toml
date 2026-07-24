@@ -26,6 +26,10 @@ echi-plugin = { path = "../../crates/echi-plugin" }
 echi-plugin-gear = { path = "../../crates/echi-plugin-gear" }
 echi-plugin-cycloidal = { path = "../../crates/echi-plugin-cycloidal" }
 log = { workspace = true }
+cadrum = { version = "0.8", optional = true }
 
 [features]
-default = []
+default = ["mesh"]
+mesh = []
+brep = ["echi-render/brep"]
+occt = ["echi-render/occt", "cadrum"]

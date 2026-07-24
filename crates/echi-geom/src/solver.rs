@@ -332,26 +332,30 @@ fn compute_residuals(
                 }
             }
             Constraint::Tangent { line, circle } => {
+                // Support both Circle and Arc as the tangent target
+                let center_opt = match sketch.entities.get(circle) {
+                    Some(SketchEntity::Circle { center, .. }) => Some(*center),
+                    Some(SketchEntity::Arc { center, .. }) => Some(*center),
+                    _ => None,
+                };
                 if let (
                     Some(SketchEntity::Line { start, end, .. }),
-                    Some(SketchEntity::Circle { center, .. }),
-                ) = (sketch.entities.get(line), sketch.entities.get(circle))
+                    Some(center_id),
+                ) = (sketch.entities.get(line), center_opt)
                 {
                     if let (Some(ps), Some(pe), Some(pc)) = (
                         point_coords(sketch, params, point_ids, *start),
                         point_coords(sketch, params, point_ids, *end),
-                        point_coords(sketch, params, point_ids, *center),
+                        point_coords(sketch, params, point_ids, center_id),
                     ) {
                         let r = get_radius(params, point_ids, radius_ids, *circle).unwrap_or(1.0);
                         // Distance from line to center = radius
                         let dx = pe.x - ps.x;
                         let dy = pe.y - ps.y;
-                        let len = (dx * dx + dy * dy).sqrt();
-                        if len > 1e-10 {
-                            let dist = (dy * pc.x - dx * pc.y + pe.x * ps.y - pe.y * ps.x).abs()
-                                / len;
-                            residuals.push(dist - r.abs());
-                        }
+                        let len = (dx * dx + dy * dy).sqrt().max(1e-10);
+                        let dist = (dy * pc.x - dx * pc.y + pe.x * ps.y - pe.y * ps.x).abs()
+                            / len;
+                        residuals.push(dist - r.abs());
                     }
                 }
             }
@@ -422,19 +426,17 @@ fn compute_residuals(
                     ) {
                         let dx = p1.x - p0.x;
                         let dy = p1.y - p0.y;
-                        let len2 = dx * dx + dy * dy;
-                        if len2 > 1e-10 {
-                            // Project midpoint onto axis
-                            let mx = (pa.x + pb.x) / 2.0;
-                            let my = (pa.y + pb.y) / 2.0;
-                            let t = ((mx - p0.x) * dx + (my - p0.y) * dy) / len2;
-                            residuals.push(mx - (p0.x + t * dx));
-                            residuals.push(my - (p0.y + t * dy));
-                            // Distance from a and b to axis should be equal
-                            let da = ((pa.y - p0.y) * dx - (pa.x - p0.x) * dy).abs() / len2.sqrt();
-                            let db = ((pb.y - p0.y) * dx - (pb.x - p0.x) * dy).abs() / len2.sqrt();
-                            residuals.push(da - db);
-                        }
+                        let len2 = (dx * dx + dy * dy).max(1e-10);
+                        // Project midpoint onto axis
+                        let mx = (pa.x + pb.x) / 2.0;
+                        let my = (pa.y + pb.y) / 2.0;
+                        let t = ((mx - p0.x) * dx + (my - p0.y) * dy) / len2;
+                        residuals.push(mx - (p0.x + t * dx));
+                        residuals.push(my - (p0.y + t * dy));
+                        // Distance from a and b to axis should be equal
+                        let da = ((pa.y - p0.y) * dx - (pa.x - p0.x) * dy).abs() / len2.sqrt();
+                        let db = ((pb.y - p0.y) * dx - (pb.x - p0.x) * dy).abs() / len2.sqrt();
+                        residuals.push(da - db);
                     }
                 }
             }
@@ -485,14 +487,12 @@ fn compute_residuals(
                         let dy1 = p1e.y - p1s.y;
                         let dx2 = p2e.x - p2s.x;
                         let dy2 = p2e.y - p2s.y;
-                        let len1 = (dx1 * dx1 + dy1 * dy1).sqrt();
-                        let len2 = (dx2 * dx2 + dy2 * dy2).sqrt();
-                        if len1 > 1e-10 && len2 > 1e-10 {
-                            let cos_a = (dx1 * dx2 + dy1 * dy2) / (len1 * len2);
-                            let cos_a = cos_a.clamp(-1.0, 1.0);
-                            let actual = cos_a.acos().to_degrees();
-                            residuals.push(actual - angle_deg);
-                        }
+                        let len1 = (dx1 * dx1 + dy1 * dy1).sqrt().max(1e-10);
+                        let len2 = (dx2 * dx2 + dy2 * dy2).sqrt().max(1e-10);
+                        let cos_a = (dx1 * dx2 + dy1 * dy2) / (len1 * len2);
+                        let cos_a = cos_a.clamp(-1.0, 1.0);
+                        let actual = cos_a.acos().to_degrees();
+                        residuals.push(actual - angle_deg);
                     }
                 }
             }
@@ -762,10 +762,14 @@ fn count_constraint_residuals(
                 }
             }
             Constraint::Tangent { line, circle } => {
+                let is_curve = matches!(
+                    sketch.entities.get(circle),
+                    Some(SketchEntity::Circle { .. }) | Some(SketchEntity::Arc { .. })
+                );
                 if let (
                     Some(SketchEntity::Line { start, end, .. }),
-                    Some(SketchEntity::Circle { .. }),
-                ) = (sketch.entities.get(line), sketch.entities.get(circle))
+                    true,
+                ) = (sketch.entities.get(line), is_curve)
                 {
                     if point_coords(sketch, params, point_ids, *start).is_some()
                         && point_coords(sketch, params, point_ids, *end).is_some()
@@ -1002,7 +1006,8 @@ fn compute_jacobian(
         params_perturbed[col] += eps;
         let r_perturbed = compute_residuals(sketch, point_ids, radius_ids, &params_perturbed);
         for row in 0..m {
-            j[(row, col)] = (r_perturbed[row] - r0[row]) / eps;
+            let rp = r_perturbed.get(row).copied().unwrap_or(0.0);
+            j[(row, col)] = (rp - r0[row]) / eps;
         }
     }
     j

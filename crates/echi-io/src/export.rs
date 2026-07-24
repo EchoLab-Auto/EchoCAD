@@ -18,7 +18,7 @@ pub enum ExportError {
 pub fn export_stl_ascii(mesh: &Mesh, writer: &mut impl Write) -> Result<(), ExportError> {
     writeln!(writer, "solid EchoCAD")?;
 
-    for chunk in mesh.indices.chunks(3) {
+    for chunk in mesh.indices.chunks_exact(3) {
         let i0 = chunk[0] as usize * 3;
         let i1 = chunk[1] as usize * 3;
         let i2 = chunk[2] as usize * 3;
@@ -306,7 +306,7 @@ pub fn export_obj(mesh: &Mesh, writer: &mut impl Write) -> Result<(), ExportErro
     }
 
     // OBJ indices are 1-based
-    for chunk in mesh.indices.chunks(3) {
+    for chunk in mesh.indices.chunks_exact(3) {
         let i0 = chunk[0] + 1;
         let i1 = chunk[1] + 1;
         let i2 = chunk[2] + 1;

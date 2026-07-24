@@ -158,6 +158,9 @@ pub enum FeatureKind {
         direction: ExtrudeDirection,
         #[serde(default)]
         draft_angle_deg: f64,
+        /// Optional region indices to extrude. `None` extrudes all regions.
+        #[serde(default)]
+        selected_regions: Option<Vec<usize>>,
     },
     Revolve {
         sketch_id: FeatureId,

@@ -24,6 +24,30 @@
       <input type="range" min="0" max="15" step="0.5" v-model.number="localDraft" @input="onChange" />
       <input type="number" step="0.5" min="0" max="15" v-model.number="localDraft" @change="onChange" class="param-num" />
     </div>
+
+    <!-- Region selection -->
+    <div v-if="regions.length > 1" class="region-section">
+      <h3 class="region-title">拉伸选区 <span class="region-count">{{ regions.length }} 个轮廓</span></h3>
+      <div class="region-toolbar">
+        <button class="region-btn" @click="selectAll">全选</button>
+        <button class="region-btn" @click="deselectAll">取消</button>
+      </div>
+      <div
+        v-for="r in regions"
+        :key="r.index"
+        class="region-item"
+        :class="{ selected: selectedRegions.includes(r.index) }"
+        @click="toggleRegion(r.index)"
+      >
+        <span class="region-check">{{ selectedRegions.includes(r.index) ? '☑' : '☐' }}</span>
+        <span class="region-label">轮廓 {{ r.index + 1 }}</span>
+        <span class="region-area">{{ r.area.toFixed(3) }} mm²</span>
+      </div>
+      <div v-if="selectedRegions.length === 0" class="region-hint">
+        未选中时拉伸全部轮廓。选中的轮廓可组成实体+孔的复合形状。
+      </div>
+    </div>
+
     <div class="param-actions">
       <button class="btn-primary" :disabled="loading" @click="onConfirm">
         {{ loading ? "处理中..." : "确认拉伸" }}
@@ -35,17 +59,19 @@
 
 <script setup lang="ts">
 import { ref, watch } from "vue";
+import type { ExtrudeRegionInfo } from "@/commands/sketch";
 
 const props = defineProps<{
   direction: string;
   depth: number;
   dist2: number;
   draft: number;
+  regions: ExtrudeRegionInfo[];
 }>();
 
 const emit = defineEmits<{
   (e: "change", config: { direction: string; depth: number; dist2: number; draft: number }): void;
-  (e: "confirm"): void;
+  (e: "confirm", selectedRegions: number[] | null): void;
   (e: "cancel"): void;
 }>();
 
@@ -54,6 +80,7 @@ const localDepth = ref(props.depth);
 const localDist2 = ref(props.dist2);
 const localDraft = ref(props.draft);
 const loading = ref(false);
+const selectedRegions = ref<number[]>([]);
 
 watch(() => props.direction, v => { localDir.value = v; });
 watch(() => props.depth, v => { localDepth.value = v; });
@@ -69,13 +96,32 @@ function onChange() {
   });
 }
 
+function toggleRegion(index: number) {
+  const idx = selectedRegions.value.indexOf(index);
+  if (idx >= 0) {
+    selectedRegions.value.splice(idx, 1);
+  } else {
+    selectedRegions.value.push(index);
+  }
+}
+
+function selectAll() {
+  selectedRegions.value = props.regions.map(r => r.index);
+}
+
+function deselectAll() {
+  selectedRegions.value = [];
+}
+
 function onConfirm() {
   loading.value = true;
-  emit("confirm");
+  // null = extrude all, [] = also extrude all, non-empty = selected
+  const regions = selectedRegions.value.length > 0 ? selectedRegions.value : null;
+  emit("confirm", regions);
 }
+
 function onCancel() { emit("cancel"); }
 
-/** Allow the parent to reset the loading state after the async operation completes. */
 function resetLoading() { loading.value = false; }
 
 defineExpose({ resetLoading });
@@ -95,29 +141,42 @@ defineExpose({ resetLoading });
   padding: 4px 6px; border-radius: 3px; font-size: 12px; cursor: pointer;
 }
 .param-select:focus { border-color: #007acc; outline: none; }
-.param-row input[type="range"] {
-  flex: 1; min-width: 60px; accent-color: #007acc;
-}
+.param-row input[type="range"] { flex: 1; min-width: 60px; accent-color: #007acc; }
 .param-num {
   width: 55px; background: #3c3c3c; border: 1px solid #555; color: #e0e0e0;
   padding: 3px 5px; border-radius: 3px; font-size: 12px; text-align: right;
 }
 .param-num:focus { border-color: #007acc; outline: none; }
+.region-section { margin: 12px 0; border-top: 1px solid #3c3c3c; padding-top: 10px; }
+.region-title { margin-bottom: 8px !important; }
+.region-toolbar { display: flex; gap: 4px; margin-bottom: 6px; }
+.region-btn {
+  font-size: 10px; padding: 2px 8px; background: #3c3c3c; border: 1px solid #555;
+  color: #ccc; cursor: pointer; border-radius: 2px;
+}
+.region-btn:hover { background: #007acc; color: #fff; }
+.region-item {
+  display: flex; align-items: center; gap: 6px; padding: 4px 6px;
+  border-radius: 3px; cursor: pointer; font-size: 12px;
+}
+.region-item:hover { background: #3c3c3c; }
+.region-item.selected { background: #1a3a5c; border: 1px solid #007acc; }
+.region-item.hole { opacity: 0.6; }
+.region-check { font-size: 12px; flex-shrink: 0; }
+.region-label { color: #ccc; flex: 1; }
+.region-area { color: #888; font-size: 11px; }
+.region-hint { font-size: 11px; color: #888; padding: 4px 6px; font-style: italic; }
 .param-actions { display: flex; gap: 8px; margin-top: 16px; }
 .btn-primary {
   background: #007acc; border: none; color: white; padding: 6px 16px;
   border-radius: 3px; cursor: pointer; font-size: 12px; flex: 1;
 }
 .btn-primary:hover { background: #0098ff; }
-.btn-primary:disabled {
-  background: #555; cursor: not-allowed; opacity: 0.6;
-}
+.btn-primary:disabled { background: #555; cursor: not-allowed; opacity: 0.6; }
 .btn-cancel {
   background: #3c3c3c; border: 1px solid #555; color: #e0e0e0;
   padding: 6px 16px; border-radius: 3px; cursor: pointer; font-size: 12px;
 }
 .btn-cancel:hover { background: #505050; }
-.btn-cancel:disabled {
-  opacity: 0.5; cursor: not-allowed;
-}
+.btn-cancel:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

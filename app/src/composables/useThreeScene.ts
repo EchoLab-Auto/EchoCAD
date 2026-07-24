@@ -24,6 +24,7 @@ export interface UseThreeSceneReturn {
   toggleEdges: () => void;
   fitView: (meshes?: THREE.Object3D[]) => void;
   worldToScreen: (wx: number, wy: number, wz: number) => { x: number; y: number };
+  captureViewport: () => string | null;
   dispose: () => void;
   animate: () => void;
 }
@@ -65,7 +66,7 @@ export function useThreeScene(): UseThreeSceneReturn {
 
     let renderer: THREE.WebGLRenderer;
     try {
-      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
     } catch (err) {
       console.error("[EchoCAD] WebGL renderer init failed:", err);
       return;
@@ -206,7 +207,14 @@ export function useThreeScene(): UseThreeSceneReturn {
     mat.dispose();
   }
 
-  return { container, ctx, wireframe, showEdges, initScene, setView, toggleWireframe, toggleEdges, fitView, worldToScreen, dispose, animate };
+  /** Capture the current 3D viewport as a base64-encoded PNG image. */
+  function captureViewport(): string | null {
+    if (!ctx.value) return null;
+    ctx.value.renderer.render(ctx.value.scene, ctx.value.camera);
+    return ctx.value.renderer.domElement.toDataURL("image/png");
+  }
+
+  return { container, ctx, wireframe, showEdges, initScene, setView, toggleWireframe, toggleEdges, fitView, worldToScreen, captureViewport, dispose, animate };
 }
 
 /// Map a string plane name to a { origin, normal, uDir, vDir } frame in 3D.

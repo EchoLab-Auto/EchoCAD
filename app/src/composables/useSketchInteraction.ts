@@ -45,6 +45,8 @@ export interface SketchInteractionState {
   // Drag/select
   isDragging: Ref<boolean>;
   dragId: Ref<EntityId | null>;
+  /// Whether the initial undo snapshot has been taken for this drag.
+  dragSnapshotted: boolean;
   // Snap result
   activeSnap: Ref<SnapResult | null>;
   hoverSketch: Ref<{ x: number; y: number }>;
@@ -68,6 +70,7 @@ export function createSketchState(): SketchInteractionState {
     pendingPointIds: ref([]),
     isDragging: ref(false),
     dragId: ref(null),
+    dragSnapshotted: false,
     activeSnap: ref(null),
     hoverSketch: ref({ x: 0, y: 0 }),
     isHovering: ref(false),

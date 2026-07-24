@@ -128,7 +128,8 @@ export async function addExtrudeFeature(
   direction?: string,
   dist2?: number,
   draftAngleDeg?: number,
-  depth?: number
+  depth?: number,
+  selectedRegions?: number[] | null,
 ): Promise<FeatureId> {
   return invoke("add_extrude_feature", {
     sketchId,
@@ -136,7 +137,18 @@ export async function addExtrudeFeature(
     dist2: dist2 || 1.0,
     draftAngleDeg: draftAngleDeg || 0.0,
     depth: depth || 1.0,
+    selectedRegions: selectedRegions ?? null,
   });
+}
+
+export interface ExtrudeRegionInfo {
+  index: number;
+  outer: [number, number][];
+  area: number;
+}
+
+export async function getExtrudeRegions(): Promise<ExtrudeRegionInfo[]> {
+  return invoke("get_extrude_regions");
 }
 
 export async function previewExtrude(
@@ -144,7 +156,8 @@ export async function previewExtrude(
   direction: string,
   dist2: number,
   draftAngleDeg: number,
-  depth: number
+  depth: number,
+  selectedRegions?: number[] | null,
 ): Promise<RenderMesh | null> {
   return invoke("preview_extrude", {
     sketchId,
@@ -152,6 +165,7 @@ export async function previewExtrude(
     dist2: dist2 || 1.0,
     draftAngleDeg: draftAngleDeg || 0.0,
     depth: depth || 1.0,
+    selectedRegions: selectedRegions ?? null,
   });
 }
 
@@ -350,7 +364,7 @@ export async function updateConstraintValue(constraint: Constraint): Promise<boo
   return invoke("update_constraint_value", { constraint });
 }
 
-export async function solveSketch(): Promise<void> {
+export async function solveSketch(): Promise<string[]> {
   return invoke("solve_sketch");
 }
 
@@ -370,6 +384,15 @@ export async function movePoint(
   y: number
 ): Promise<void> {
   return invoke("move_point", { id, x, y });
+}
+
+/// Move a point without creating an undo snapshot (for drag intermediates).
+export async function movePointNoSnapshot(
+  id: EntityId,
+  x: number,
+  y: number
+): Promise<void> {
+  return invoke("move_point_no_snapshot", { id, x, y });
 }
 
 export async function clearSketch(): Promise<void> {
@@ -394,6 +417,18 @@ export async function getAllSolidMeshes(): Promise<SolidMeshEntry[]> {
 
 export async function getRegenErrors(): Promise<Array<[FeatureId, string]>> {
   return invoke("get_regen_errors");
+}
+
+export async function getUseBrep(): Promise<boolean> {
+  return invoke("get_use_brep");
+}
+
+export async function setUseBrep(value: boolean): Promise<void> {
+  return invoke("set_use_brep", { value });
+}
+
+export async function captureViewport(): Promise<string> {
+  return invoke("capture_viewport");
 }
 
 export async function saveProject(): Promise<string> {

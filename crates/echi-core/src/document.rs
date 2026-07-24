@@ -150,6 +150,7 @@ mod tests {
                 distance: ParameterId(1),
                 direction: crate::feature::ExtrudeDirection::OneSide,
                 draft_angle_deg: 0.0,
+                selected_regions: None,
             },
         ));
         doc.add_parameter("depth", 1.0);

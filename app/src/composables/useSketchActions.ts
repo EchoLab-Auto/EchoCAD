@@ -69,7 +69,8 @@ export function useSketchActions(
       const other = points.find(p => p.id !== sel);
       if (other) return [sel, other.id];
     }
-    return [points[0].id, points[1].id];
+    // Don't fall back to arbitrary entities — user must select
+    return null;
   }
 
   function pickTwoLines(): [EntityId, EntityId] | null {
@@ -80,7 +81,7 @@ export function useSketchActions(
       const other = lines.find(l => l.id !== sel);
       if (other) return [sel, other.id];
     }
-    return [lines[0].id, lines[1].id];
+    return null;
   }
 
   function pickLineAndCircle(): [EntityId, EntityId] | null {
@@ -90,7 +91,7 @@ export function useSketchActions(
     const sel = sketchStore.selectedId;
     if (sel !== null && lines.some(l => l.id === sel)) return [sel, circles[0].id];
     if (sel !== null && circles.some(c => c.id === sel)) return [lines[0].id, sel];
-    return [lines[0].id, circles[0].id];
+    return null;
   }
 
   function pickTwoCircles(): [EntityId, EntityId] | null {
@@ -101,7 +102,7 @@ export function useSketchActions(
       const other = circles.find(c => c.id !== sel);
       if (other) return [sel, other.id];
     }
-    return [circles[0].id, circles[1].id];
+    return null;
   }
 
   function pickPointAndLine(): [EntityId, EntityId] | null {
@@ -111,7 +112,7 @@ export function useSketchActions(
     const sel = sketchStore.selectedId;
     if (sel !== null && points.some(p => p.id === sel)) return [sel, lines[0].id];
     if (sel !== null && lines.some(l => l.id === sel)) return [points[0].id, sel];
-    return [points[0].id, lines[0].id];
+    return null;
   }
 
   // ── Constraint helpers ───────────────────────────────────────────
@@ -299,7 +300,17 @@ export function useSketchActions(
   }
 
   async function solve() {
-    await solveSketch();
+    const diagnostics = await solveSketch();
+    if (diagnostics.length > 0) {
+      // Show first diagnostic as a warning; additional ones as info
+      for (const msg of diagnostics) {
+        if (msg.includes("over-constrained") || msg.includes("conflict")) {
+          toastStore.error(msg);
+        } else {
+          toastStore.info(msg);
+        }
+      }
+    }
     await refreshSketch();
     await loadState();
     await unifiedViewport.value?.refreshViewport();
@@ -459,6 +470,8 @@ export function useSketchActions(
   async function exitSketchEdit() {
     if (sketchStore.editingSketchId === null) return;
     sketchStore.setEditingSketch(null);
+    // Clear stale entities so they don't render on the wrong plane
+    sketchStore.setEntities([]);
     toolbarRef.value?.closeAllMenus();
     await unifiedViewport.value?.refreshViewport();
   }

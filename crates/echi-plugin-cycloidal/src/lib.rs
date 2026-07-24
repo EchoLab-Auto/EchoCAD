@@ -153,7 +153,7 @@ impl Plugin for CycloidalPlugin {
             }
         };
         let p = params_from(params, defs_ref);
-        p.validate().map_err(PluginError::InvalidParameter)?;
+        p.validate().map_err(|s| PluginError::invalid_param(s))?;
 
         match generator_id {
             "cycloidal_wheel" => Ok(generate_cycloidal_wheel(&p)),

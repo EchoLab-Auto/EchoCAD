@@ -63,12 +63,13 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, watch } from "vue";
+import { listen } from "@tauri-apps/api/event";
 import * as THREE from "three";
 import {
   getAllSolidMeshes,
   getSketchEntities, getSketchConstraints,
   addPoint, addLine, addCircle, addArc, addSpline, addEllipse,
-  addConstraint, solveSketch, movePoint, deleteEntity,
+  addConstraint, solveSketch, movePoint, movePointNoSnapshot, deleteEntity,
   type RenderMesh, type EntityId,
 } from "@/commands/sketch";
 import { useSketchStore } from "@/stores/sketch";
@@ -113,6 +114,7 @@ const {
   toggleEdges: toggleSceneEdges,
   fitView: fitSceneView,
   worldToScreen,
+  captureViewport,
   dispose,
   animate,
 } = useThreeScene();
@@ -427,7 +429,8 @@ function getActivePlane() {
   // While editing a sketch, always use the sketch's stored plane — the
   // toolbar's activePlane dropdown is for the NEXT sketch only.
   if (isSketchMode.value) {
-    const f = store.features.find(x => x.id === store.activeFeatureId);
+    const sketchId = store.editingSketchId ?? store.activeFeatureId;
+    const f = sketchId ? store.features.find(x => x.id === sketchId) : null;
     if (f?.plane && f.plane !== "offset") {
       return planeFrame(f.plane);
     }
@@ -437,7 +440,10 @@ function getActivePlane() {
 
 function getActivePlaneName(): string {
   if (isSketchMode.value) {
-    const f = store.features.find(x => x.id === store.activeFeatureId);
+    // Use the editing sketch ID to get the correct plane — activeFeatureId
+    // may point to a different feature selected in the tree.
+    const sketchId = store.editingSketchId ?? store.activeFeatureId;
+    const f = sketchId ? store.features.find(x => x.id === sketchId) : null;
     if (f?.plane && f.plane !== "offset") {
       return f.plane;
     }
@@ -1006,15 +1012,23 @@ async function handleDrawingMouseDown(sketch: { x: number; y: number }) {
         try {
           if (state.circleCenterId.value === null && state.circleCenterPos.value) {
             const id = await addTrackedPoint(state.circleCenterPos.value.x, state.circleCenterPos.value.y);
-            if (id === null) { resetDrawingState(state); return; }
+            if (id === null) { resetDrawingState(state); toast.error("无法创建圆心点"); return; }
             state.circleCenterId.value = id;
           }
           const center = getCircleCenterCoords();
           if (center && state.circleCenterId.value !== null) {
             const r = Math.hypot(world.x - center.x, world.y - center.y);
             if (r > 0.01) {
-              await addCircle(state.circleCenterId.value, r);
+              const circleId = await addCircle(state.circleCenterId.value, r);
+              if (circleId === null) {
+                toast.error("无法创建圆 — 请确认当前处于草图编辑模式");
+                resetDrawingState(state);
+                clearSketchPreviews();
+                return;
+              }
             }
+          } else {
+            toast.error("无法获取圆心坐标");
           }
           // Center point is now referenced by the circle — clear tracking.
           pendingPointIds.value = [];
@@ -1208,7 +1222,13 @@ async function onMouseMove(e: MouseEvent) {
     if (sketch) {
       try {
         const target = activeSnap.value?.world ?? sketch;
-        await movePoint(state.dragId.value, target.x, target.y);
+        // First move takes a snapshot; subsequent moves skip it to avoid flooding undo stack
+        if (!state.dragSnapshotted) {
+          await movePoint(state.dragId.value, target.x, target.y);
+          state.dragSnapshotted = true;
+        } else {
+          await movePointNoSnapshot(state.dragId.value, target.x, target.y);
+        }
         await solveSketch();
         await refreshSketch();
       } catch (err) {
@@ -1292,6 +1312,7 @@ async function onMouseMove(e: MouseEvent) {
 function onMouseUp() {
   const wasDragging = state.isDragging.value;
   state.isDragging.value = false;
+  state.dragSnapshotted = false;
   state.dragId.value = null;
   // M9 should listen for this event and call unifiedViewport.value?.refreshViewport()
   // to keep the solid mesh in sync after the drag moves sketch points.
@@ -1379,20 +1400,32 @@ function getPointCoords(id: EntityId): { x: number; y: number } | null {
 
 /// Return the current line-start coordinates, whether the start came from
 /// an existing snap (`lineStartId`) or a deferred position (`lineStartPos`).
+/// Falls back to `lineStartPos` when the point was just created and the store
+/// hasn't been refreshed yet (getPointCoords returns null).
 function getLineStartCoords(): { x: number; y: number } | null {
-  if (state.lineStartId.value !== null) return getPointCoords(state.lineStartId.value);
+  if (state.lineStartId.value !== null) {
+    return getPointCoords(state.lineStartId.value) ?? state.lineStartPos.value;
+  }
   return state.lineStartPos.value;
 }
 
 /// Return the current circle-center coordinates.
+/// Falls back to `circleCenterPos` when the center point was just created
+/// and the store hasn't been refreshed yet.
 function getCircleCenterCoords(): { x: number; y: number } | null {
-  if (state.circleCenterId.value !== null) return getPointCoords(state.circleCenterId.value);
+  if (state.circleCenterId.value !== null) {
+    return getPointCoords(state.circleCenterId.value) ?? state.circleCenterPos.value;
+  }
   return state.circleCenterPos.value;
 }
 
 /// Return the current arc-center coordinates.
+/// Falls back to `arcCenterPos` when the center point was just created
+/// and the store hasn't been refreshed yet.
 function getArcCenterCoords(): { x: number; y: number } | null {
-  if (state.arcCenterId.value !== null) return getPointCoords(state.arcCenterId.value);
+  if (state.arcCenterId.value !== null) {
+    return getPointCoords(state.arcCenterId.value) ?? state.arcCenterPos.value;
+  }
   return state.arcCenterPos.value;
 }
 
@@ -1480,14 +1513,14 @@ function clearPreviewMesh() {
   }
 }
 
-defineExpose({ refreshViewport, refreshSketch, showPreviewMesh, clearPreviewMesh, setView });
+defineExpose({ refreshViewport, refreshSketch, showPreviewMesh, clearPreviewMesh, setView, fitView });
 
 // ── Watchers ───────────────────────────────────────────────────
 
 watch(isSketchMode, (editing) => {
   if (!ctx.value) return;
-  // Only show sketch entities while editing; hide them in 3D view like SolidWorks.
-  ctx.value.sketchGroup.visible = editing;
+  // Always show sketch entities so they are visible in 3D view.
+  ctx.value.sketchGroup.visible = true;
   if (editing) {
     setView("face");
     ctx.value.controls.enableRotate = true;
@@ -1545,14 +1578,35 @@ watch(() => store.measurePoints, () => {
   }
 }, { deep: true });
 
-onMounted(() => {
+// Color / opacity changes should trigger an immediate viewport refresh
+watch(() => store.featureColors, () => {
+  refreshViewport();
+}, { deep: true });
+
+watch(() => store.featureOpacities, () => {
+  refreshViewport();
+}, { deep: true });
+
+let unlistenCapture: (() => void) | null = null;
+
+onMounted(async () => {
   initScene();
   refreshViewport();
   refreshSketchEntities();
   animate();
+
+  // Listen for viewport capture requests from the backend
+  unlistenCapture = await listen("capture-viewport", () => {
+    const dataUrl = captureViewport();
+    if (dataUrl) {
+      const { emit } = (window as any).__TAURI__?.event ?? {};
+      emit?.("viewport-image", { data: dataUrl });
+    }
+  });
 });
 
 onUnmounted(() => {
+  if (unlistenCapture) unlistenCapture();
   destroyHighlightGroup();
   dispose();
 });

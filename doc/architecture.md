@@ -203,3 +203,18 @@ Backward-compatibility: legacy files without `suppressed` default to
 The Tauri backend persists a JSON list of up to 10 most-recent project
 paths in `app_config_dir/recent_files.json`. The "文件 ▾" menu surfaces
 them as a section at the bottom of the dropdown.
+
+## Roadmap: Parametric B-Rep Pipeline
+
+The current pure-triangle-mesh pipeline has fundamental limitations
+(see [Parametric Refactor Plan](./parametric-refactor-plan.md) for
+the detailed analysis and phased migration strategy).
+
+Key points:
+- All solid features currently produce `Mesh` (flat `positions/normals/indices`)
+- Fillet/chamfer are mesh-level approximations; edge selections use raw vertex pairs
+- The plan introduces an `echi-brep` crate with a `BrepKernel` trait
+  and OpenCASCADE integration
+- Migration follows the Strangler Fig pattern: B-rep and mesh pipelines
+  coexist during the transition
+- Estimated timeline: 22 weeks across 7 phases

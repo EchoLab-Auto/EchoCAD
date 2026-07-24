@@ -290,7 +290,24 @@ pub fn add_extrude_feature(...) -> Result<FeatureId, String> {
 
 ---
 
+## 13. 迁移兼容性（Migration Compatibility）
+
+**原则：迁移期间新旧管线必须共存，通过 feature flag 切换，绝不能出现"中间状态不可用"。**
+
+在参数化 B-rep 管线迁移过程中（详见[参数化重构方案](./parametric-refactor-plan.md)）：
+
+- 所有几何操作通过 `BrepKernel` trait 抽象
+- `AppState.use_brep: AtomicBool` 控制分发路径
+- 旧网格路径保留为降级回退，直到 P6 阶段才删除
+- 文件格式版本号 (`format_version`) 区分 v1（网格）和 v2（B-rep）格式
+- 旧项目文件可以通过独立的迁移工具批量升级
+
+**反例（风险）**：在特性迁移到一半时删除旧 FeatureKind 变体，导致中间版本无法打开现有项目文件。
+
+---
+
 ## 相关文档
 
 - [架构总览](./architecture.md) — crate 划分与数据流
 - [交互指南](./interaction-guide.md) — 用户视角的功能说明
+- [参数化重构方案](./parametric-refactor-plan.md) — B-rep 管线迁移的完整技术方案

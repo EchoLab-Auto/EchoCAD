@@ -116,9 +116,7 @@ impl Plugin for GearPlugin {
                 let sketch = generate_gear_sketch(&gear_params);
                 let thickness = params.get("thickness").copied().unwrap_or(5.0);
                 if thickness.abs() < 1e-6 {
-                    return Err(PluginError::InvalidParameter(
-                        "thickness must be non-zero".into(),
-                    ));
+                    return Err(PluginError::invalid_param("thickness must be non-zero"));
                 }
                 echi_plugin::extrude(
                     &sketch,
@@ -167,7 +165,7 @@ fn gear_params_from(plugin: &GearPlugin, params: &HashMap<String, f64>) -> Resul
         involute_points: 10,
     };
     if gp.teeth < 5 {
-        return Err(PluginError::InvalidParameter("Teeth must be at least 5".into()));
+        return Err(PluginError::invalid_param("Teeth must be at least 5"));
     }
     Ok(gp)
 }

@@ -9,7 +9,7 @@ import type {
   GeneratorInfo,
   PluginInfo,
 } from "@/commands/sketch";
-import { setFeatureColor as setFeatureColorCmd } from "@/commands/sketch";
+import { setFeatureColor as setFeatureColorCmd, setUseBrep, getUseBrep } from "@/commands/sketch";
 
 export type Tool = "select" | "line" | "circle" | "arc" | "rectangle" | "spline" | "ellipse" | "plugin";
 
@@ -45,6 +45,23 @@ export const useSketchStore = defineStore("sketch", () => {
 
   function clearMeasurePoints() {
     measurePoints.value = [];
+  }
+
+  // ── B-rep pipeline toggle ────────────────────────────────────────
+  const useBrep = ref<boolean>(false);
+
+  async function initBrep() {
+    try { useBrep.value = await getUseBrep(); } catch { /* command unavailable without brep feature */ }
+  }
+
+  async function toggleBrep() {
+    const next = !useBrep.value;
+    try {
+      await setUseBrep(next);
+      useBrep.value = next;
+    } catch {
+      // Backend may not support brep — keep current state
+    }
   }
 
   // ── Edge-pick mode (for fillet/chamfer) ──────────────────────────
@@ -277,6 +294,10 @@ export const useSketchStore = defineStore("sketch", () => {
     measurePoints,
     toggleMeasure,
     clearMeasurePoints,
+    // B-rep toggle
+    useBrep,
+    toggleBrep,
+    initBrep,
     // Edge pick
     edgePickMode,
     pendingEdges,

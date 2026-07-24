@@ -17,6 +17,7 @@
       @open-plugin="openPluginDialog"
       @offset-plane="openOffsetDialog"
       @clear-sketch="clearSketchAction"
+      @toggle-brep="toggleBrep"
       @toggle-measure="toggleMeasure"
     />
 
@@ -55,6 +56,7 @@
       <!-- Right sidebar: Properties -->
       <aside class="sidebar-right">
         <PropertiesPanel
+          :regions="extrudeRegions"
           @rename="renameSelectedFeature"
           @update-param="updateParam"
           @update-entity-prop="updateEntityProp"
@@ -63,7 +65,7 @@
           @delete-constraint="deleteConstraint"
           @clear-constraints="clearAllConstraints"
           @extrude-change="onExtrudeConfigChange"
-          @extrude-confirm="doExtrude"
+          @extrude-confirm="(sel: number[] | null) => doExtrude(sel)"
           @extrude-cancel="cancelExtrude"
           @enter-edge-pick="onEnterEdgePick"
           @exit-edge-pick="cancelEdgePick"
@@ -159,6 +161,7 @@ const layoutRoot = ref<HTMLDivElement | null>(null);
 
 const {
   doExtrude, cancelExtrude, onExtrudeConfigChange, showExtrudePanel,
+  extrudeRegions,
   revolve,
   confirmEdgePick, cancelEdgePick,
   booleanDialog, confirmBoolean, cancelBoolean,
@@ -197,9 +200,12 @@ const statusText = computed(() => {
       ellipse: "点击放置椭圆中心",
       plugin: "插件工具",
     };
-    return `${toolLabels[sketchStore.activeTool] || sketchStore.activeTool} · ${sketchStore.entities.length} 个实体`;
+    const planeLabels: Record<string, string> = { xy: "XY", yz: "YZ", zx: "ZX" };
+    const plane = planeLabels[sketchStore.activePlane] || sketchStore.activePlane;
+    return `${toolLabels[sketchStore.activeTool] || sketchStore.activeTool} · 平面 ${plane} · ${sketchStore.entities.length} 实体 · ${sketchStore.constraints.length} 约束`;
   }
-  return "3D 视口 — 选择特征进行编辑";
+  const featureCount = sketchStore.features.length;
+  return `3D 视口 · ${featureCount} 个特征 · 选择特征进行编辑`;
 });
 
 // ── Helpers ───────────────────────────────────────────────────────
@@ -285,6 +291,11 @@ function onEdgeSelected(_featureId: number, _vA: number, _vB: number) {
 
 function toggleMeasure() {
   sketchStore.toggleMeasure();
+}
+
+async function toggleBrep() {
+  await sketchStore.toggleBrep();
+  await unifiedViewport.value?.refreshViewport();
 }
 
 /// Enter edge-pick mode from the PropertiesPanel (when editing an existing
@@ -494,15 +505,33 @@ async function onKeyDown(e: KeyboardEvent) {
   if (e.ctrlKey && (e.key === "y" || (e.key === "Z" && e.shiftKey))) {
     e.preventDefault(); redoAction(); return;
   }
+  if (e.ctrlKey && e.key === "0") { e.preventDefault(); unifiedViewport.value?.fitView(); return; }
+
+  // Space: fit view (only when not in input fields)
+  if (e.key === " " && !isEditingSketch.value) {
+    e.preventDefault();
+    unifiedViewport.value?.fitView();
+    return;
+  }
 
   // Feature shortcuts work whenever a sketch is selected (edit mode not required).
   switch (e.key) {
     case "e": case "E": showExtrudePanel(); return;
     case "w": case "W": revolve(); return;
+    case "f": case "F": onFeatureAction("fillet"); return;
     case "n": case "N": newSketch(); return;
   }
 
-  if (!isEditingSketch.value) return;
+  if (!isEditingSketch.value) {
+    // Outside sketch mode: Delete key deletes selected feature
+    if ((e.key === "Delete" || e.key === "Backspace") && sketchStore.selectedFeatureId !== null) {
+      e.preventDefault();
+      const f = sketchStore.features.find(x => x.id === sketchStore.selectedFeatureId);
+      if (f) await deleteFeature(f.id);
+      return;
+    }
+    return;
+  }
 
   switch (e.key) {
     case "l": case "L": sketchStore.setTool("line"); break;
@@ -522,7 +551,15 @@ async function onKeyDown(e: KeyboardEvent) {
         e.preventDefault();
       }
       break;
-    case "Escape": sketchStore.setTool("select"); break;
+    case "Escape":
+      // First Escape: deselect / switch to select tool.
+      // Second Escape (when already in select mode): exit sketch editing.
+      if (sketchStore.activeTool === "select" && sketchStore.selectedId === null) {
+        exitSketchEdit();
+      } else {
+        sketchStore.setTool("select");
+      }
+      break;
   }
 }
 
@@ -530,6 +567,7 @@ async function onKeyDown(e: KeyboardEvent) {
 
 onMounted(async () => {
   await loadState();
+  await sketchStore.initBrep();
   await refreshPlugins();
   await refreshRecent();
   layoutRoot.value?.focus();
