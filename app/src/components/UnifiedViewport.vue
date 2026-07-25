@@ -97,6 +97,9 @@ const emit = defineEmits<{
   (e: "drag-end"): void;
   /** Emitted when the user clicks an edge in edge-pick mode. */
   (e: "edgeSelected", featureId: number, vA: number, vB: number): void;
+  /** Emitted when a driving dimension is edited via the overlay. HomeView
+   *  should re-run loadState() so feature errors/params stay fresh. */
+  (e: "dimension-edited"): void;
 }>();
 
 const store = useSketchStore();
@@ -417,7 +420,11 @@ function clearMeasureVisuals() {
     measureLine = null;
   }
   if (measureLabelSprite) {
-    (measureLabelSprite.material as THREE.Material).dispose();
+    // Material.dispose() does NOT dispose textures — the per-label
+    // CanvasTexture would leak one GPU texture per measurement.
+    const mat = measureLabelSprite.material as THREE.SpriteMaterial;
+    mat.map?.dispose();
+    mat.dispose();
     highlightGroup?.remove(measureLabelSprite);
     measureLabelSprite = null;
   }
@@ -1431,12 +1438,17 @@ function getArcCenterCoords(): { x: number; y: number } | null {
 
 /// Delete every pending entity, then clear the tracking array. Used when the
 /// user cancels mid-draw so that no orphan entities linger in the sketch.
+/// Always re-syncs the store afterwards — without this the deleted points
+/// linger as ghosts (rendered, pickable, constrainable) until the next
+/// unrelated refresh (原则2).
 async function cleanupPendingPoints() {
   const ids = [...pendingPointIds.value];
   pendingPointIds.value = [];
+  if (ids.length === 0) return;
   for (const id of ids) {
     try { await deleteEntity(id); } catch { /* best-effort */ }
   }
+  await refreshSketch();
 }
 
 /// Register a freshly created point id for cleanup on cancel. When the shape
@@ -1467,6 +1479,10 @@ async function refreshSketch() {
 
 async function onDimensionRefresh() {
   await refreshSketch();
+  // A dimension edit changes sketch geometry, which any dependent solid is
+  // built from — refresh the viewport too (原则2), not just the 2D layer.
+  await refreshViewport();
+  emit("dimension-edited");
 }
 
 /**
@@ -1546,6 +1562,9 @@ watch(isDrawing, (drawing) => {
 
 watch(() => store.activeTool, () => {
   // Delete any pending orphan entities before resetting tool state.
+  // Fire-and-forget is fine: cleanupPendingPoints re-syncs the store at
+  // the end and races with the next draw are prevented because the next
+  // gesture can't start until the user clicks again.
   cleanupPendingPoints();
   resetDrawingState(state);
   clearSketchPreviews();

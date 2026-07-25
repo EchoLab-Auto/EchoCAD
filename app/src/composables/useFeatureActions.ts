@@ -144,6 +144,14 @@ export function useFeatureActions(
     sketchStore.showExtrudePanel = false;
     unifiedViewport.value?.clearPreviewMesh();
     extrudeRegions.value = [];
+    selectedPreviewRegions.value = null;
+  }
+
+  /// Region selection changed in the panel — update the preview so it
+  /// matches what the final extrude will produce (原则2).
+  function onExtrudeRegionChange(sel: number[] | null) {
+    selectedPreviewRegions.value = sel;
+    updateExtrudePreview(sketchStore.extrudeConfig);
   }
 
   async function doExtrude(selectedRegions: number[] | null = null) {
@@ -342,6 +350,7 @@ export function useFeatureActions(
     doExtrude,
     cancelExtrude,
     onExtrudeConfigChange,
+    onExtrudeRegionChange,
     showExtrudePanel,
     extrudeRegions,
     selectedPreviewRegions,

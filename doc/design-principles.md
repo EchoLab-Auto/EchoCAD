@@ -289,6 +289,8 @@ pub fn add_extrude_feature(...) -> Result<FeatureId, String> {
 - [ ] THREE 对象是否被 Proxy 了（ref vs shallowRef/markRaw）？
 - [ ] **新功能是否同时有 Tauri command + Agent API 封装（原则 #14）？**
 - [ ] **Agent API 的参数是否与 command 签名一一对应（编译期类型检查）？**
+- [ ] **验证是否发生在 mutation 之前（validate-then-mutate，§15）？**
+- [ ] **文档被整体替换时（new/open/undo/redo），按 FeatureId 键控的 UI 状态是否被重置（§16）？**
 
 ---
 
@@ -363,6 +365,77 @@ measure_angle                  measureAngle                  ✅
 **反例（0.3 之前）：** Agent API 的 `line()` 直接传坐标给期望 EntityId 的
 `add_line` 命令——因为 UI 从不这样调用，这个错位直到 agent 实际使用才暴露。
 教训：API 封装必须与命令签名同步编译检查，且要有冒烟测试覆盖。
+
+---
+
+## 15. 先验证，后变更（Validate-then-Mutate）
+
+**原则：任何可能失败的 mutation，验证必须在第一次写操作之前完成。失败路径不得留下半成品状态，也不得产生 undo 快照。**
+
+```rust
+// ❌ 错误（0.4 审计发现）：先分配参数再验证，失败时留下孤儿参数 + 废 undo 条目
+state.snapshot();
+let param_id = doc.add_parameter(name, value);   // ← 已变更
+let kind = kind_fn(id, param_id);
+for dep in probe(&kind).dependencies() {
+    if doc.get_feature(dep).is_none() { return Err(...); }  // ← 孤儿参数留在文档里
+}
+
+// ✅ 正确：用 peek_next_id 推测性构造 kind → 验证 → 通过后才 snapshot + 分配
+let next = doc.peek_next_id();
+let kind = kind_fn(FeatureId(next + 1), ParameterId(next));
+for dep in probe(&kind).dependencies() {
+    if doc.get_feature(dep).is_none() { return Err(...); }  // ← 零副作用返回
+}
+state.snapshot();
+doc.add_parameter(...);   // 分配顺序与推测一致，id 必然匹配（debug_assert 兜底）
+```
+
+**配套规则：** 目标对象不存在时的 no-op 命令（update_parameter / rename_feature /
+非活跃草图下的实体操作）直接 early-return，不推快照——否则 undo 栈被死条目填满。
+
+---
+
+## 16. 文档替换时的状态重置（Document-Replacement Reset）
+
+**原则：文档被整体替换（新建 / 打开 / 撤销 / 重做）时，一切按 FeatureId 键控的 UI 状态必须显式重置——后端 id 从 1 重新开始，旧键必然错位。**
+
+高危键控状态：
+
+| 状态 | 泄漏后果（0.4 审计实证） |
+|------|------------------------|
+| `featureColors` / `featureOpacities` | 新文档的同 id 特征被染成旧颜色，且遮蔽文件持久化的颜色 |
+| `editingSketchId` | 新文档 Sketch1（同 id）直接进入编辑模式，用户并未选择 |
+| `activeTool` | 新文档里上一个文档的绘制工具仍处于激活态 |
+| `selectedFeatureId` / `selectedId` | 属性面板/高亮指向错误特征或已删除实体 |
+| undo 栈（后端） | Ctrl+Z 恢复的是**上一个文档**的内容 |
+| STEP 导入网格（后端） | 旧文档的导入体出现在新文档视口中 |
+
+**正确做法：** 统一的 `resetPerDocumentState()`（前端）+ `UndoManager::clear()` +
+`imported_meshes.clear()`（后端），在 new/open/undo/redo 四个入口全部调用。
+undo/redo 也算文档替换——它恢复的是旧快照，id 空间可能完全不同。
+
+**反例（审计发现）：** 设 Extrude(id 2) 为红色 → 文件→新建 → 画矩形拉伸 →
+新文档的 Extrude(id 2) 自动变红。
+
+---
+
+## 17. 高频变更走懒失效，不走即时再生（Lazy Invalidation）
+
+**原则：会被高频触发的 mutation（拖动点、连续绘制）不得同步触发重型再生；改文档时只置脏标记，读取结果时才再生。**
+
+```
+写路径（每次 mousemove）          读路径（每次视口刷新）
+────────────────────────────      ────────────────────────────
+with_active_sketch_mut            get_all_solid_meshes / get_features / …
+  → 改 sketch                       → if regen_dirty.swap(false):
+  → regen_dirty = true                    regen_locked()   // 恰好一次
+```
+
+**0.4 审计发现的两端错误：**
+- 草图变更命令从不触发 regen → 编辑已有拉伸特征的草图，3D 模型永远停在旧形状（违反原则 2）；
+- 反过来若每条命令都即时 regen → 拖动一次产生上百次全模型重建。
+懒失效同时修复两者：写路径 O(1)，读路径至多再生一次。
 
 ---
 

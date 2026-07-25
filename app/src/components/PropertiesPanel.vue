@@ -13,6 +13,7 @@
       @change="onExtrudeConfigChange"
       @confirm="(sel: number[] | null) => emit('extrude-confirm', sel)"
       @cancel="emit('extrude-cancel')"
+      @region-change="(sel: number[] | null) => emit('extrude-region-change', sel)"
     />
 
     <!-- Feature properties -->
@@ -253,10 +254,14 @@ const emit = defineEmits<{
   (e: "extrude-change", config: ExtrudeConfig): void;
   (e: "extrude-confirm", selectedRegions: number[] | null): void;
   (e: "extrude-cancel"): void;
+  (e: "extrude-region-change", selectedRegions: number[] | null): void;
   (e: "enter-edge-pick"): void;
   (e: "exit-edge-pick"): void;
   (e: "confirm-edge-pick", radius: number): void;
   (e: "remove-picked-edge", index: number): void;
+  /** Fired after color/opacity changes so HomeView can re-sync features
+   *  (loadState) — keeps FeatureNode.color in the store fresh (原则6.1). */
+  (e: "appearance-changed"): void;
 }>();
 
 const sketchStore = useSketchStore();
@@ -316,20 +321,23 @@ const hasCustomColor = computed(() => {
 });
 
 /// Called when the native color input changes. Stores the selected color
-/// in the featureColors map and persists it to the backend.
-function onColorChange(event: Event) {
+/// in the featureColors map and persists it to the backend, then re-syncs
+/// so the store's FeatureNode.color matches the backend (原则6.1).
+async function onColorChange(event: Event) {
   const input = event.target as HTMLInputElement;
   const hex = input.value;
   if (selectedFeature.value) {
-    sketchStore.persistFeatureColor(selectedFeature.value.id, hex);
+    await sketchStore.persistFeatureColor(selectedFeature.value.id, hex);
+    emit("appearance-changed");
   }
 }
 
 /// Remove the custom color override so the feature goes back to the
 /// default palette color.
-function resetColor() {
+async function resetColor() {
   if (!selectedFeature.value) return;
-  sketchStore.persistFeatureColor(selectedFeature.value.id, null);
+  await sketchStore.persistFeatureColor(selectedFeature.value.id, null);
+  emit("appearance-changed");
 }
 
 /// Current opacity for the selected feature. Falls back to 1.0 (fully opaque).

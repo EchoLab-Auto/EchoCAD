@@ -242,17 +242,28 @@ export const useSketchStore = defineStore("sketch", () => {
   /// so the viewport picks up the change on the next refresh. Pass `null` to
   /// remove the override and revert to the default palette color.
   /// Also calls the backend set_feature_color command so the color survives
-  /// project save/load (M14).
+  /// project save/load (M14). Backend failures surface as toasts (原则8).
   async function persistFeatureColor(featureId: number, hex: string | null) {
+    const { useToastStore } = await import("@/stores/toast");
+    const toast = useToastStore();
     if (hex === null) {
       const next: Record<number, string> = { ...featureColors.value };
       delete next[featureId];
       featureColors.value = next;
-      setFeatureColorCmd(featureId, null).catch(() => {});
+      setFeatureColorCmd(featureId, null).catch((e) => toast.error(`颜色重置失败: ${e}`));
     } else {
       featureColors.value = { ...featureColors.value, [featureId]: hex };
-      setFeatureColorCmd(featureId, hex).catch(() => {});
+      setFeatureColorCmd(featureId, hex).catch((e) => toast.error(`颜色保存失败: ${e}`));
     }
+  }
+
+  /// Clear all per-feature color/opacity overrides. Called whenever the
+  /// document is replaced (new/open/undo/redo): ids restart from 1 in the
+  /// backend, so stale overrides would alias onto unrelated features and
+  /// shadow the file's persisted colors (原则1).
+  function clearAppearanceOverrides() {
+    featureColors.value = {};
+    featureOpacities.value = {};
   }
 
   return {
@@ -287,6 +298,7 @@ export const useSketchStore = defineStore("sketch", () => {
     setActivePluginTool,
     setFeatureColor,
     persistFeatureColor,
+    clearAppearanceOverrides,
     setFeatureOpacity,
     isEditingSketch,
     // Measurement

@@ -73,6 +73,10 @@ const emit = defineEmits<{
   (e: "change", config: { direction: string; depth: number; dist2: number; draft: number }): void;
   (e: "confirm", selectedRegions: number[] | null): void;
   (e: "cancel"): void;
+  /** Fired when the user toggles a region selection, so the 3D preview
+   *  can re-render with only the selected loops (preview must match the
+   *  final extrude — 原则2). */
+  (e: "region-change", selectedRegions: number[] | null): void;
 }>();
 
 const localDir = ref(props.direction);
@@ -103,14 +107,21 @@ function toggleRegion(index: number) {
   } else {
     selectedRegions.value.push(index);
   }
+  emitRegionChange();
+}
+
+function emitRegionChange() {
+  emit("region-change", selectedRegions.value.length > 0 ? [...selectedRegions.value] : null);
 }
 
 function selectAll() {
   selectedRegions.value = props.regions.map(r => r.index);
+  emitRegionChange();
 }
 
 function deselectAll() {
   selectedRegions.value = [];
+  emitRegionChange();
 }
 
 function onConfirm() {

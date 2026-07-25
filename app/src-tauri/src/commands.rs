@@ -34,6 +34,13 @@ impl UndoManager {
     }
     fn can_undo(&self) -> bool { !self.undo_stack.is_empty() }
     fn can_redo(&self) -> bool { !self.redo_stack.is_empty() }
+    /// Drop all undo/redo history. Used when the document is REPLACED
+    /// wholesale (project load) — snapshots of the previous document would
+    /// restore the wrong state.
+    fn clear(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+    }
     fn undo(
         &mut self,
         current_doc: &Document,
@@ -69,6 +76,15 @@ pub struct AppState {
     pub autosave_enabled: AtomicBool,
     pub has_recovery_file: AtomicBool,
     pub use_brep: AtomicBool,
+    /// Set whenever sketch data changes without an immediate regen.
+    /// Mesh-reading commands (`get_all_solid_meshes`, `get_solid_mesh`, …)
+    /// check this flag and regenerate lazily, so sketch edits propagate to
+    /// dependent solids exactly once — never per mousemove during drags.
+    pub regen_dirty: AtomicBool,
+    /// Meshes imported from external formats (STEP). They are not backed by
+    /// document features, so the regen pipeline would drop them — every
+    /// regen helper re-injects them into the fresh result afterwards.
+    imported_meshes: Mutex<HashMap<FeatureId, echi_geom::Mesh>>,
 }
 
 impl AppState {
@@ -96,6 +112,8 @@ impl AppState {
             autosave_enabled: AtomicBool::new(true),
             has_recovery_file: AtomicBool::new(false),
             use_brep: AtomicBool::new(false),
+            regen_dirty: AtomicBool::new(false),
+            imported_meshes: Mutex::new(HashMap::new()),
         }
     }
 
@@ -103,6 +121,15 @@ impl AppState {
         let doc = self.lock_doc();
         let active = *self.lock_sketch();
         self.lock_undo().push_snapshot(&doc, active);
+    }
+
+    /// Snapshot only when an active sketch exists. Sketch-entity commands
+    /// are no-ops without one; pushing an undo entry anyway would pollute
+    /// the stack with dead steps (principle #3).
+    fn snapshot_if_sketch(&self) {
+        if self.lock_sketch().is_some() {
+            self.snapshot();
+        }
     }
 
     /// Like [`snapshot`] but returns a token (the undo stack length *before*
@@ -142,8 +169,27 @@ impl AppState {
         let id = active?;
         let feature = doc.get_feature_mut(id)?;
         match &mut feature.kind {
-            FeatureKind::Sketch { sketch, .. } | FeatureKind::CustomSketch { sketch, .. } => Some(f(sketch)),
+            FeatureKind::Sketch { sketch, .. } | FeatureKind::CustomSketch { sketch, .. } => {
+                let result = f(sketch);
+                // Sketch data changed — dependent solids are now stale.
+                // Regeneration happens lazily on the next mesh read
+                // (regen_if_dirty), so point drags don't re-tessellate
+                // the whole model per mousemove.
+                self.regen_dirty.store(true, Ordering::SeqCst);
+                Some(result)
+            }
             _ => None,
+        }
+    }
+
+    /// Regenerate if any sketch mutation marked the result dirty since the
+    /// last read. Cheap no-op otherwise. Called at the top of every command
+    /// that serves mesh data, so readers always see fresh geometry without
+    /// paying for regen on write-only paths.
+    fn regen_if_dirty(&self) {
+        if self.regen_dirty.swap(false, Ordering::SeqCst) {
+            let doc = self.lock_doc();
+            regen_locked(&doc, self);
         }
     }
 
@@ -208,6 +254,12 @@ pub struct FeatureNode {
     /// `None` means the renderer should use the default palette-based color.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// The primary upstream feature this feature modifies (Fillet/Chamfer/
+    /// Shell target, pattern/mirror target, extrude/revolve source sketch).
+    /// Exposed so the UI can act on the real dependency instead of guessing
+    /// by tree position (e.g. edge-pick for an existing fillet).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<FeatureId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -264,11 +316,23 @@ fn brep_kernel_for_state(state: &AppState) -> Option<&'static dyn BrepKernel> {
     }
 }
 
+/// Re-inject STEP-imported meshes into a fresh regen result. Imported solids
+/// aren't backed by document features, so the pipeline can't produce them;
+/// without this they would vanish on the next regen.
+fn reinject_imported(result: &mut RegenResult, state: &AppState) {
+    let imported = state.imported_meshes.lock()
+        .expect("imported_meshes mutex poisoned");
+    for (fid, mesh) in imported.iter() {
+        result.solids.insert(*fid, mesh.clone());
+    }
+}
+
 fn regenerate_state(state: &AppState) {
     let doc = state.lock_doc();
     let solid_gen: &dyn SolidGenerator = &PluginSolidGen(&state.plugin_registry);
     let brep_kernel = brep_kernel_for_state(state);
-    let result = regenerate_with(&doc, Some(solid_gen), brep_kernel, None);
+    let mut result = regenerate_with(&doc, Some(solid_gen), brep_kernel, None);
+    reinject_imported(&mut result, state);
     *state.lock_regen() = result;
 }
 
@@ -276,7 +340,8 @@ fn regenerate_state(state: &AppState) {
 fn regen_locked(doc: &Document, state: &AppState) {
     let solid_gen: &dyn SolidGenerator = &PluginSolidGen(&state.plugin_registry);
     let brep_kernel = brep_kernel_for_state(state);
-    let result = regenerate_with(doc, Some(solid_gen), brep_kernel, None);
+    let mut result = regenerate_with(doc, Some(solid_gen), brep_kernel, None);
+    reinject_imported(&mut result, state);
     *state.lock_regen() = result;
 }
 
@@ -288,7 +353,8 @@ fn incremental_regen_locked(doc: &Document, state: &AppState, changed_id: Featur
     let brep_kernel = brep_kernel_for_state(state);
     let mut prev = state.lock_regen().clone();
     prev.dirty = RegenResult::compute_dirty(doc, changed_id);
-    let result = regenerate_with(doc, Some(solid_gen), brep_kernel, Some(&prev));
+    let mut result = regenerate_with(doc, Some(solid_gen), brep_kernel, Some(&prev));
+    reinject_imported(&mut result, state);
     *state.lock_regen() = result;
 }
 
@@ -377,6 +443,16 @@ fn feature_to_node(f: &Feature, doc: &Document, errors: &HashMap<FeatureId, Stri
         PlaneDefinition::XY => "xy".to_string(),
     });
 
+    let target_id = match &f.kind {
+        FeatureKind::Extrude { sketch_id, .. } | FeatureKind::Revolve { sketch_id, .. } => Some(*sketch_id),
+        FeatureKind::Fillet { target_id, .. } | FeatureKind::Chamfer { target_id, .. }
+        | FeatureKind::Shell { target_id, .. } => Some(*target_id),
+        FeatureKind::LinearPattern { target_id, .. } | FeatureKind::CircularPattern { target_id, .. }
+        | FeatureKind::Mirror { target_id, .. } => Some(*target_id),
+        FeatureKind::Sweep { profile_sketch_id, .. } => Some(*profile_sketch_id),
+        _ => None,
+    };
+
     FeatureNode {
         id: f.id(),
         name: f.name.clone(),
@@ -387,6 +463,7 @@ fn feature_to_node(f: &Feature, doc: &Document, errors: &HashMap<FeatureId, Stri
         errors: errors.get(&f.id()).cloned(),
         plane,
         color: f.color.clone(),
+        target_id,
     }
 }
 
@@ -394,27 +471,35 @@ fn feature_to_node(f: &Feature, doc: &Document, errors: &HashMap<FeatureId, Stri
 
 /// Locks the doc, snapshots the undo state, allocates a parameter,
 /// creates the feature with the given kind, and regenerates.
-/// Validates that all dependencies exist before committing.
+/// Validates dependencies BEFORE mutating: a failed add leaves no orphan
+/// parameter and no bogus undo entry.
 fn add_feature_with_param(
     state: &AppState,
     param_name: &str,
     param_value: f64,
     kind_fn: impl FnOnce(FeatureId, ParameterId) -> FeatureKind,
 ) -> Result<FeatureId, String> {
+    // Build the kind with speculative ids (param = next, feature = next+1,
+    // matching the allocation order below) and validate first.
+    let (kind, expected_param_id, expected_id) = {
+        let doc = state.lock_doc();
+        let next = doc.peek_next_id();
+        let kind = kind_fn(FeatureId(next + 1), ParameterId(next));
+        let probe = Feature::new(FeatureId(next + 1), "probe", kind.clone());
+        for dep in probe.dependencies() {
+            if doc.get_feature(dep).is_none() {
+                return Err(format!("Dependency {:?} does not exist", dep));
+            }
+        }
+        (kind, ParameterId(next), FeatureId(next + 1))
+    };
+
     state.snapshot();
     let mut doc = state.lock_doc();
-    let next = doc.next_id();
-    let param_id = doc.add_parameter(format!("{}{}", param_name, next), param_value);
+    let param_id = doc.add_parameter(format!("{}{}", param_name, expected_id.0), param_value);
+    debug_assert_eq!(param_id, expected_param_id);
     let id = doc.new_feature_id();
-    let kind = kind_fn(id, param_id);
-
-    // Validate dependencies before committing
-    let probe = Feature::new(id, "probe", kind.clone());
-    for dep in probe.dependencies() {
-        if doc.get_feature(dep).is_none() {
-            return Err(format!("Dependency {:?} does not exist", dep));
-        }
-    }
+    debug_assert_eq!(id, expected_id);
 
     let name = default_feature_name(&kind, id);
     doc.add_feature(Feature::new(id, name, kind));
@@ -443,18 +528,21 @@ fn default_feature_name(kind: &FeatureKind, id: FeatureId) -> String {
 
 /// Locks the doc, snapshots, creates the feature (no parameter), regenerates.
 fn add_feature_kind(state: &AppState, kind: FeatureKind) -> Result<FeatureId, String> {
-    state.snapshot();
-    let mut doc = state.lock_doc();
-    let id = doc.new_feature_id();
-
-    // Validate dependencies before committing
-    let probe = Feature::new(id, "probe", kind.clone());
-    for dep in probe.dependencies() {
-        if doc.get_feature(dep).is_none() {
-            return Err(format!("Dependency {:?} does not exist", dep));
+    // Validate dependencies BEFORE snapshot/mutation: a failed add must not
+    // grow the undo stack (validate-then-mutate, principle #3).
+    {
+        let doc = state.lock_doc();
+        let probe = Feature::new(FeatureId(doc.peek_next_id()), "probe", kind.clone());
+        for dep in probe.dependencies() {
+            if doc.get_feature(dep).is_none() {
+                return Err(format!("Dependency {:?} does not exist", dep));
+            }
         }
     }
 
+    state.snapshot();
+    let mut doc = state.lock_doc();
+    let id = doc.new_feature_id();
     let name = default_feature_name(&kind, id);
     doc.add_feature(Feature::new(id, name, kind));
     regen_locked(&doc, &state);
@@ -465,6 +553,7 @@ fn add_feature_kind(state: &AppState, kind: FeatureKind) -> Result<FeatureId, St
 
 #[tauri::command]
 pub fn get_features(state: tauri::State<AppState>) -> Vec<FeatureNode> {
+    state.regen_if_dirty();
     let doc = state.lock_doc();
     let errors = &state.lock_regen().errors;
     doc.features.iter().map(|f| feature_to_node(f, &doc, errors)).collect()
@@ -686,6 +775,14 @@ pub fn add_boolean_feature(
 
 #[tauri::command]
 pub fn update_parameter(id: ParameterId, value: f64, state: tauri::State<AppState>) {
+    // Only snapshot when the parameter actually exists — otherwise this is
+    // a silent no-op that must not grow the undo stack (principle #3).
+    {
+        let doc = state.lock_doc();
+        if doc.get_parameter(id).is_none() {
+            return;
+        }
+    }
     state.snapshot();
     let mut doc = state.lock_doc();
     if let Some(p) = doc.get_parameter_mut(id) {
@@ -716,6 +813,12 @@ fn parameter_belongs_to(kind: &FeatureKind, pid: ParameterId) -> bool {
 
 #[tauri::command]
 pub fn rename_feature(id: FeatureId, name: String, state: tauri::State<AppState>) {
+    {
+        let doc = state.lock_doc();
+        if doc.get_feature(id).is_none() {
+            return; // no-op for nonexistent id — don't grow the undo stack
+        }
+    }
     state.snapshot();
     let mut doc = state.lock_doc();
     if let Some(f) = doc.get_feature_mut(id) {
@@ -726,6 +829,12 @@ pub fn rename_feature(id: FeatureId, name: String, state: tauri::State<AppState>
 
 #[tauri::command]
 pub fn set_feature_suppressed(id: FeatureId, suppressed: bool, state: tauri::State<AppState>) {
+    {
+        let doc = state.lock_doc();
+        if doc.get_feature(id).is_none() {
+            return;
+        }
+    }
     state.snapshot();
     let mut doc = state.lock_doc();
     if let Some(f) = doc.get_feature_mut(id) {
@@ -813,6 +922,8 @@ pub fn clear_document(app: tauri::AppHandle, state: tauri::State<'_, AppState>) 
         FeatureKind::Sketch { sketch: Sketch::new(), plane: PlaneDefinition::default() },
     ));
     *state.lock_sketch() = Some(id);
+    // Imported meshes belong to the old document — drop them too.
+    state.imported_meshes.lock().expect("imported_meshes poisoned").clear();
     regen_locked(&doc, &state);
     clear_autosave_file(&app);
 }
@@ -876,7 +987,7 @@ pub fn get_sketch_constraints(state: tauri::State<AppState>) -> Vec<Constraint> 
 
 #[tauri::command]
 pub fn remove_constraint(index: usize, state: tauri::State<AppState>) -> bool {
-    state.snapshot();
+    state.snapshot_if_sketch();
     state.with_active_sketch_mut(|s| {
         if index >= s.constraints.len() {
             return false;
@@ -888,37 +999,37 @@ pub fn remove_constraint(index: usize, state: tauri::State<AppState>) -> bool {
 
 #[tauri::command]
 pub fn add_point(x: f64, y: f64, state: tauri::State<AppState>) -> Option<EntityId> {
-    state.snapshot();
+    state.snapshot_if_sketch();
     state.with_active_sketch_mut(|s| s.add_point(x, y))
 }
 #[tauri::command]
 pub fn add_line(start: EntityId, end: EntityId, state: tauri::State<AppState>) -> Option<EntityId> {
-    state.snapshot();
+    state.snapshot_if_sketch();
     state.with_active_sketch_mut(|s| s.add_line(start, end))
 }
 #[tauri::command]
 pub fn add_circle(center: EntityId, radius: f64, state: tauri::State<AppState>) -> Option<EntityId> {
-    state.snapshot();
+    state.snapshot_if_sketch();
     state.with_active_sketch_mut(|s| s.add_circle(center, radius))
 }
 #[tauri::command]
 pub fn add_arc(center: EntityId, radius: f64, start_angle: f64, end_angle: f64, state: tauri::State<AppState>) -> Option<EntityId> {
-    state.snapshot();
+    state.snapshot_if_sketch();
     state.with_active_sketch_mut(|s| s.add_arc(center, radius, start_angle, end_angle))
 }
 #[tauri::command]
 pub fn add_spline(control_points: Vec<EntityId>, state: tauri::State<AppState>) -> Option<EntityId> {
-    state.snapshot();
+    state.snapshot_if_sketch();
     state.with_active_sketch_mut(|s| s.add_spline(control_points))
 }
 #[tauri::command]
 pub fn add_ellipse(center: EntityId, major_axis_end: EntityId, ratio: f64, state: tauri::State<AppState>) -> Option<EntityId> {
-    state.snapshot();
+    state.snapshot_if_sketch();
     state.with_active_sketch_mut(|s| s.add_ellipse(center, major_axis_end, ratio))
 }
 #[tauri::command]
 pub fn add_constraint(constraint: Constraint, state: tauri::State<AppState>) {
-    state.snapshot();
+    state.snapshot_if_sketch();
     state.with_active_sketch_mut(|s| s.add_constraint(constraint));
 }
 
@@ -928,7 +1039,7 @@ pub fn add_constraint(constraint: Constraint, state: tauri::State<AppState>) {
 /// that fight each other in the solver.
 #[tauri::command]
 pub fn update_constraint_value(constraint: Constraint, state: tauri::State<AppState>) -> bool {
-    state.snapshot();
+    state.snapshot_if_sketch();
     state.with_active_sketch_mut(|s| {
         // Find an existing constraint with the same variant and target
         // entities, then replace its value in place.
@@ -955,14 +1066,18 @@ pub fn update_constraint_value(constraint: Constraint, state: tauri::State<AppSt
 }
 #[tauri::command]
 pub fn solve_sketch(state: tauri::State<AppState>) -> Vec<String> {
-    state.snapshot();
+    state.snapshot_if_sketch();
     let mut diagnostics = Vec::new();
     state.with_active_sketch_mut(|s| {
-        echi_geom::solve(s, 100, 1e-6);
-        diagnostics = echi_geom::check_overconstrained(s)
-            .into_iter()
-            .map(|(_, msg)| msg)
-            .collect();
+        let iterations = echi_geom::solve(s, 100, 1e-6);
+        if iterations.is_none() {
+            diagnostics.push("警告：约束求解未收敛（100 次迭代后仍未达到容差）".to_string());
+        }
+        diagnostics.extend(
+            echi_geom::check_overconstrained(s)
+                .into_iter()
+                .map(|(_, msg)| msg),
+        );
     });
     diagnostics
 }
@@ -979,7 +1094,7 @@ pub fn move_point_no_snapshot(id: EntityId, x: f64, y: f64, state: tauri::State<
 
 fn move_point_inner(id: EntityId, x: f64, y: f64, skip_snapshot: bool, state: tauri::State<AppState>) {
     if !skip_snapshot {
-        state.snapshot();
+        state.snapshot_if_sketch();
     }
     state.with_active_sketch_mut(|s| {
         if let Some(p) = s.get_point_mut(id) {
@@ -991,7 +1106,7 @@ fn move_point_inner(id: EntityId, x: f64, y: f64, skip_snapshot: bool, state: ta
 
 #[tauri::command]
 pub fn update_entity_prop(id: EntityId, prop: String, value: f64, state: tauri::State<AppState>) -> bool {
-    state.snapshot();
+    state.snapshot_if_sketch();
     state.with_active_sketch_mut(|sketch| {
         match sketch.entities.get_mut(&id) {
             Some(SketchEntity::Point(p)) => match prop.as_str() {
@@ -1033,13 +1148,13 @@ pub fn update_entity_prop(id: EntityId, prop: String, value: f64, state: tauri::
 /// via `Sketch::delete_entity_cascade` — otherwise deleting a circle's center
 /// point would leave the circle stranded at (0,0).
 pub fn delete_entity(id: EntityId, state: tauri::State<AppState>) -> bool {
-    state.snapshot();
+    state.snapshot_if_sketch();
     state.with_active_sketch_mut(|s| !s.delete_entity_cascade(id).is_empty()).unwrap_or(false)
 }
 
 #[tauri::command]
 pub fn clear_sketch(state: tauri::State<AppState>) {
-    state.snapshot();
+    state.snapshot_if_sketch();
     state.with_active_sketch_mut(|s| *s = Sketch::new());
     regenerate_state(&state);
 }
@@ -1048,6 +1163,7 @@ pub fn clear_sketch(state: tauri::State<AppState>) {
 
 #[tauri::command]
 pub fn get_solid_mesh(state: tauri::State<AppState>) -> Option<RenderMesh> {
+    state.regen_if_dirty();
     let result = state.lock_regen();
     result.current_solid.and_then(|id| result.solids.get(&id)).map(RenderMesh::from)
 }
@@ -1154,6 +1270,7 @@ pub struct SolidMeshEntry {
 
 #[tauri::command]
 pub fn get_all_solid_meshes(state: tauri::State<AppState>) -> Vec<SolidMeshEntry> {
+    state.regen_if_dirty();
     let doc = state.lock_doc();
     let result = state.lock_regen();
     result.solids.iter().map(|(id, mesh)| {
@@ -1167,6 +1284,7 @@ pub fn get_all_solid_meshes(state: tauri::State<AppState>) -> Vec<SolidMeshEntry
 
 #[tauri::command]
 pub fn get_regen_errors(state: tauri::State<AppState>) -> Vec<(FeatureId, String)> {
+    state.regen_if_dirty();
     let result = state.lock_regen();
     let mut errors: Vec<(FeatureId, String)> = result.errors.iter().map(|(k, v)| (*k, v.clone())).collect();
     errors.sort_by_key(|(id, _)| id.0);
@@ -1281,6 +1399,11 @@ pub fn load_project_cmd(app: tauri::AppHandle, state: tauri::State<'_, AppState>
                 .find_map(|f| if f.is_sketch() { Some(f.id()) } else { None })
         }; // doc lock dropped here
         *state.lock_sketch() = active;
+        // Loading replaces the entire document — undo history for the
+        // previous document would restore the wrong state. Clear it.
+        state.lock_undo().clear();
+        // Imported meshes belong to the previous document — drop them.
+        state.imported_meshes.lock().map_err(|e| e.to_string())?.clear();
         regenerate_state(&state);
         record_recent_file(&app, &path);
         clear_autosave_file(&app);
@@ -1302,6 +1425,10 @@ pub fn load_project_from(app: tauri::AppHandle, state: tauri::State<'_, AppState
             .find_map(|f| if f.is_sketch() { Some(f.id()) } else { None })
     }; // doc lock dropped here
     *state.lock_sketch() = active;
+    // Loading replaces the entire document — clear stale undo history.
+    state.lock_undo().clear();
+    // Imported meshes belong to the previous document — drop them.
+    state.imported_meshes.lock().map_err(|e| e.to_string())?.clear();
     regenerate_state(&state);
     clear_autosave_file(&app);
     Ok(())
@@ -1350,8 +1477,8 @@ pub fn clear_recent_files(app: tauri::AppHandle) -> bool {
     std::fs::write(&p, "[]").is_ok()
 }
 
-#[tauri::command]
 /// Merge all solid meshes in the regen result into a single combined mesh.
+/// (Internal helper — not a registered Tauri command.)
 fn merge_all_export_meshes(result: &RegenResult) -> Option<echi_geom::Mesh> {
     if result.solids.is_empty() {
         return result.current_solid.and_then(|id| result.solids.get(&id)).cloned();
@@ -1374,6 +1501,7 @@ pub fn export_stl(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> R
     let path = app.dialog().file().add_filter("STL", &["stl"]).blocking_save_file();
     if let Some(path) = path {
         let path = file_path_to_path(path).ok_or("Invalid file path")?;
+        state.regen_if_dirty();
         let mesh = {
             let result = state.lock_regen();
             merge_all_export_meshes(&result).ok_or("No solid to export")?
@@ -1392,6 +1520,7 @@ pub fn export_obj(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> R
     let path = app.dialog().file().add_filter("OBJ", &["obj"]).blocking_save_file();
     if let Some(path) = path {
         let path = file_path_to_path(path).ok_or("Invalid file path")?;
+        state.regen_if_dirty();
         let mesh = {
             let result = state.lock_regen();
             merge_all_export_meshes(&result).ok_or("No solid to export")?
@@ -1410,6 +1539,7 @@ pub fn export_gltf_cmd(app: tauri::AppHandle, state: tauri::State<'_, AppState>)
     let path = app.dialog().file().add_filter("glTF", &["gltf"]).blocking_save_file();
     if let Some(path) = path {
         let path = file_path_to_path(path).ok_or("Invalid file path")?;
+        state.regen_if_dirty();
         let mesh = {
             let result = state.lock_regen();
             merge_all_export_meshes(&result).ok_or("No solid to export")?
@@ -1521,9 +1651,12 @@ pub fn import_step(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> 
             Ok(RenderMesh::from(&mesh))
         }).collect::<Result<Vec<_>, String>>()?;
 
-        // Store imported meshes in regen result so they appear in the viewport.
-        // Use a synthetic FeatureId range to avoid collisions with document IDs.
+        // Store in imported_meshes so every future regen re-injects them
+        // (regen pipeline can't produce them — no backing document feature).
+        // Synthetic FeatureId range avoids collisions with document IDs.
         {
+            let mut imported = state.imported_meshes.lock()
+                .map_err(|e| format!("lock error: {e}"))?;
             let mut result = state.lock_regen();
             let base = FeatureId(u64::MAX - 1000);
             for (i, rm) in render_meshes.iter().enumerate() {
@@ -1533,6 +1666,7 @@ pub fn import_step(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> 
                     normals: rm.normals.clone(),
                     indices: rm.indices.iter().map(|&x| x).collect(),
                 };
+                imported.insert(fid, mesh.clone());
                 result.solids.insert(fid, mesh);
             }
         }
@@ -1814,6 +1948,7 @@ pub fn get_mass_properties(
         }
     }
 
+    state.regen_if_dirty();
     let result = state.lock_regen();
     let mesh = result.solids.get(&feature_id).ok_or("feature has no solid mesh")?;
     let props = echi_geom::compute_mass_properties(mesh).ok_or("empty mesh")?;

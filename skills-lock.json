@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "language-standards": {
+      "source": "EchoLab-Auto/skill-language-standards",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "9a250b872f4d0f344bf25f2829d7e5134e3163bb901bdb5dc87117ca0a0125aa"
+    }
+  }
+}

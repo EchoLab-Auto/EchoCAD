@@ -50,7 +50,7 @@
 
       <!-- Main viewport -->
       <main class="viewport">
-        <UnifiedViewport ref="unifiedViewport" @faceSelected="onFaceSelected" @drag-end="onDragEnd" @edgeSelected="onEdgeSelected" />
+        <UnifiedViewport ref="unifiedViewport" @faceSelected="onFaceSelected" @drag-end="onDragEnd" @edgeSelected="onEdgeSelected" @dimension-edited="loadState" />
       </main>
 
       <!-- Right sidebar: Properties -->
@@ -67,9 +67,11 @@
           @extrude-change="onExtrudeConfigChange"
           @extrude-confirm="(sel: number[] | null) => doExtrude(sel)"
           @extrude-cancel="cancelExtrude"
+          @extrude-region-change="onExtrudeRegionChange"
           @enter-edge-pick="onEnterEdgePick"
           @exit-edge-pick="cancelEdgePick"
           @confirm-edge-pick="confirmEdgePick"
+          @appearance-changed="loadState"
         />
       </aside>
     </div>
@@ -161,7 +163,7 @@ const layoutRoot = ref<HTMLDivElement | null>(null);
 
 const {
   doExtrude, cancelExtrude, onExtrudeConfigChange, showExtrudePanel,
-  extrudeRegions,
+  extrudeRegions, onExtrudeRegionChange,
   revolve,
   confirmEdgePick, cancelEdgePick,
   booleanDialog, confirmBoolean, cancelBoolean,
@@ -230,7 +232,7 @@ async function refreshRecent() {
 async function openRecent(path: string) {
   try {
     await loadProjectFrom(path);
-    sketchStore.selectedFeatureId = null;
+    resetPerDocumentState();
     const features = await getFeatures();
     const firstSketch = features.find(f => f.feature_type === "Sketch" || f.feature_type.startsWith("Custom:"));
     if (firstSketch) sketchStore.setActiveFeature(firstSketch.id);
@@ -295,23 +297,22 @@ function toggleMeasure() {
 
 async function toggleBrep() {
   await sketchStore.toggleBrep();
+  // B-rep toggle triggers a full backend regen — feature errors can change
+  // (a feature may fail on one path and succeed on the other), so the
+  // feature tree must re-sync too (原则2).
+  await loadState();
   await unifiedViewport.value?.refreshViewport();
 }
 
 /// Enter edge-pick mode from the PropertiesPanel (when editing an existing
-/// Fillet/Chamfer feature). Uses the same target solid.
+/// Fillet/Chamfer feature). Uses the feature's recorded target solid —
+/// never a positional guess, which can silently pick the wrong solid when
+/// the tree has multiple solids (原则1; target_id exposed per 原则14).
 function onEnterEdgePick() {
   const f = sketchStore.selectedFeature;
   if (!f) return;
   const type = f.feature_type === "Fillet" ? "fillet" : "chamfer";
-  // Find the target solid by looking at the feature right before this one.
-  const idx = sketchStore.features.findIndex(x => x.id === f.id);
-  const solidBefore = sketchStore.features.slice(0, idx).reverse().find(fn => {
-    return ["Extrude", "Revolve", "Fillet", "Chamfer", "LinearPattern", "CircularPattern",
-      "Mirror", "Sweep", "Shell", "Boolean"].includes(fn.feature_type) ||
-      fn.feature_type.startsWith("CustomSolid");
-  });
-  const targetId = solidBefore?.id ?? null;
+  const targetId = f.target_id ?? null;
   if (targetId === null) {
     toastStore.info("找不到目标实体");
     return;
@@ -332,9 +333,23 @@ async function updateParam(id: ParameterId, event: Event) {
 
 // ── Document operations ───────────────────────────────────────────
 
+/// Reset all per-document UI state when the document is REPLACED
+/// (new/open/undo/redo). Backend feature ids restart from 1, so any state
+/// keyed by FeatureId (appearance overrides, selection, editing session)
+/// would alias onto unrelated features of the new document (原则1/2.1).
+function resetPerDocumentState() {
+  sketchStore.selectedFeatureId = null;
+  sketchStore.clearAppearanceOverrides();
+  // Exit any sketch-edit session — the user never chose to edit the new
+  // document's same-id sketch.
+  sketchStore.setEditingSketch(null);
+  sketchStore.setTool("select");
+  sketchStore.select(null);
+}
+
 async function clearDoc() {
   await clearDocument();
-  sketchStore.selectedFeatureId = null;
+  resetPerDocumentState();
   const features = await getFeatures();
   const firstSketch = features.find(f => f.feature_type === "Sketch" || f.feature_type.startsWith("Custom:"));
   if (firstSketch) sketchStore.setActiveFeature(firstSketch.id);
@@ -370,7 +385,7 @@ async function saveProjectFile() {
 async function loadProjectFile() {
   try {
     await loadProject();
-    sketchStore.selectedFeatureId = null;
+    resetPerDocumentState();
     const features = await getFeatures();
     const firstSketch = features.find(f => f.feature_type === "Sketch" || f.feature_type.startsWith("Custom:"));
     if (firstSketch) sketchStore.setActiveFeature(firstSketch.id);
@@ -416,7 +431,7 @@ async function exportGltfFile() {
 
 async function undoAction() {
   if (await undo()) {
-    sketchStore.selectedFeatureId = null;
+    resetPerDocumentState();
     await loadState();
     await unifiedViewport.value?.refreshViewport();
   }
@@ -424,7 +439,7 @@ async function undoAction() {
 
 async function redoAction() {
   if (await redo()) {
-    sketchStore.selectedFeatureId = null;
+    resetPerDocumentState();
     await loadState();
     await unifiedViewport.value?.refreshViewport();
   }

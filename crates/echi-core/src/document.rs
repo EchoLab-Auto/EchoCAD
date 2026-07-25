@@ -45,6 +45,13 @@ impl Document {
         id
     }
 
+    /// Peek at the id that the next `next_id()` call would return, without
+    /// consuming it. Used to build a `FeatureKind` for dependency validation
+    /// *before* committing any allocation (validate-then-mutate).
+    pub fn peek_next_id(&self) -> u64 {
+        self.next_id
+    }
+
     pub fn new_feature_id(&mut self) -> FeatureId {
         FeatureId(self.next_id())
     }

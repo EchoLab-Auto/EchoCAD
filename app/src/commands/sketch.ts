@@ -103,6 +103,9 @@ export interface FeatureNode {
   /** Optional per-feature color as a hex string (e.g. "#ff8800").
    *  `null` / absent means the renderer should use the default palette. */
   color?: string | null;
+  /** Primary upstream feature id (Fillet/Chamfer/Shell/Pattern/Mirror target,
+   *  Extrude/Revolve source sketch). Use this instead of positional heuristics. */
+  target_id?: FeatureId | null;
 }
 
 export interface RenderMesh {
