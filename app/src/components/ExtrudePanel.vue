@@ -90,6 +90,14 @@ watch(() => props.direction, v => { localDir.value = v; });
 watch(() => props.depth, v => { localDepth.value = v; });
 watch(() => props.dist2, v => { localDist2.value = v; });
 watch(() => props.draft, v => { localDraft.value = v; });
+// Reset the region selection whenever the region list itself changes —
+// reopening the panel on a different sketch must not leak the previous
+// sketch's selection (stale indices target the wrong loops). Same pattern
+// as BooleanDialog's targets watcher.
+watch(() => props.regions, () => {
+  selectedRegions.value = [];
+  emit("region-change", null);
+});
 
 function onChange() {
   emit("change", {

@@ -43,8 +43,7 @@ export function useSketchActions(
     sketchStore.isLoading = true;
     try {
       sketchStore.setFeatures(await getFeatures());
-      sketchStore.setEntities(await getSketchEntities());
-      unifiedViewport.value?.refreshSketch();
+      await refreshSketch();
     } finally {
       sketchStore.isLoading = false;
     }
@@ -54,9 +53,17 @@ export function useSketchActions(
     sketchStore.setFeatures(await getFeatures());
   }
 
+  /// Sync sketch entities + constraints from the backend exactly once.
+  /// The viewport's refreshSketch does the fetches AND re-renders; falling
+  /// back to a bare fetch only before the viewport is mounted. Calling this
+  /// composable's loadState afterwards must NOT re-fetch entities again —
+  /// a constraint click previously cost ~5 getSketchEntities round-trips.
   async function refreshSketch() {
-    sketchStore.setEntities(await getSketchEntities());
-    unifiedViewport.value?.refreshSketch();
+    if (unifiedViewport.value) {
+      await unifiedViewport.value.refreshSketch();
+    } else {
+      sketchStore.setEntities(await getSketchEntities());
+    }
   }
 
   // ── Entity pickers (used by constraint helpers) ──────────────────
@@ -126,7 +133,6 @@ export function useSketchActions(
     try {
       await addConstraint({ Horizontal: { line: id } });
       await solveSketch();
-      await refreshSketch();
       await loadState();
       await unifiedViewport.value?.refreshViewport();
     } catch (err) {
@@ -143,7 +149,6 @@ export function useSketchActions(
     try {
       await addConstraint({ Vertical: { line: id } });
       await solveSketch();
-      await refreshSketch();
       await loadState();
       await unifiedViewport.value?.refreshViewport();
     } catch (err) {
@@ -157,7 +162,6 @@ export function useSketchActions(
     try {
       await addConstraint({ Parallel: { line_a: ids[0], line_b: ids[1] } });
       await solveSketch();
-      await refreshSketch();
       await loadState();
       await unifiedViewport.value?.refreshViewport();
     } catch (err) {
@@ -171,7 +175,6 @@ export function useSketchActions(
     try {
       await addConstraint({ Perpendicular: { line_a: ids[0], line_b: ids[1] } });
       await solveSketch();
-      await refreshSketch();
       await loadState();
       await unifiedViewport.value?.refreshViewport();
     } catch (err) {
@@ -185,7 +188,6 @@ export function useSketchActions(
     try {
       await addConstraint({ Tangent: { line: ids[0], circle: ids[1] } });
       await solveSketch();
-      await refreshSketch();
       await loadState();
       await unifiedViewport.value?.refreshViewport();
     } catch (err) {
@@ -199,7 +201,6 @@ export function useSketchActions(
     try {
       await addConstraint({ Concentric: { a: ids[0], b: ids[1] } });
       await solveSketch();
-      await refreshSketch();
       await loadState();
       await unifiedViewport.value?.refreshViewport();
     } catch (err) {
@@ -213,7 +214,6 @@ export function useSketchActions(
     try {
       await addConstraint({ Equal: { a: ids[0], b: ids[1] } });
       await solveSketch();
-      await refreshSketch();
       await loadState();
       await unifiedViewport.value?.refreshViewport();
     } catch (err) {
@@ -227,7 +227,6 @@ export function useSketchActions(
     try {
       await addConstraint({ Midpoint: { point: ids[0], line: ids[1] } });
       await solveSketch();
-      await refreshSketch();
       await loadState();
       await unifiedViewport.value?.refreshViewport();
     } catch (err) {
@@ -244,7 +243,6 @@ export function useSketchActions(
     try {
       await addConstraint({ Fix: { point: id } });
       await solveSketch();
-      await refreshSketch();
       await loadState();
       await unifiedViewport.value?.refreshViewport();
     } catch (err) {
@@ -258,7 +256,6 @@ export function useSketchActions(
     try {
       await addConstraint({ Angle: { line_a: ids[0], line_b: ids[1], angle_deg: 90.0 } });
       await solveSketch();
-      await refreshSketch();
       await loadState();
       await unifiedViewport.value?.refreshViewport();
     } catch (err) {
@@ -277,7 +274,6 @@ export function useSketchActions(
     try {
       await addConstraint({ Diameter: { circle: target.id, diameter: r * 2 } });
       await solveSketch();
-      await refreshSketch();
       await loadState();
       await unifiedViewport.value?.refreshViewport();
     } catch (err) {
@@ -291,7 +287,6 @@ export function useSketchActions(
     try {
       await addConstraint({ Distance: { a: ids[0], b: ids[1], distance: 2.0 } });
       await solveSketch();
-      await refreshSketch();
       await loadState();
       await unifiedViewport.value?.refreshViewport();
     } catch (err) {
@@ -325,7 +320,6 @@ export function useSketchActions(
   async function deleteConstraint(index: number) {
     try {
       await removeConstraint(index);
-      await refreshSketch();
       await loadState();
       await unifiedViewport.value?.refreshViewport();
     } catch (err) {
@@ -343,7 +337,6 @@ export function useSketchActions(
       for (let i = 0; i < n; i++) {
         await removeConstraint(0);
       }
-      await refreshSketch();
       await loadState();
       await unifiedViewport.value?.refreshViewport();
     } catch (err) {
@@ -458,6 +451,10 @@ export function useSketchActions(
     await refreshFeatures();
     // Creating a new sketch enters edit mode immediately (SolidWorks behavior).
     await enterSketchEdit(id);
+    // A new sketch feature also mutates the document — refresh the viewport
+    // to keep the sync invariant airtight (原则2), even though an empty
+    // sketch currently produces no solid.
+    await unifiedViewport.value?.refreshViewport();
   }
 
   async function clearSketchAction() {

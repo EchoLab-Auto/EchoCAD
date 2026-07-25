@@ -255,9 +255,15 @@ async function refreshFeatures() {
   sketchStore.setFeatures(await getFeatures());
 }
 
+/// Sync sketch entities + constraints exactly once. The viewport's
+/// refreshSketch fetches both AND re-renders; a bare fetch is the fallback
+/// only before the viewport mounts.
 async function refreshSketch() {
-  sketchStore.setEntities(await getSketchEntities());
-  unifiedViewport.value?.refreshSketch();
+  if (unifiedViewport.value) {
+    await unifiedViewport.value.refreshSketch();
+  } else {
+    sketchStore.setEntities(await getSketchEntities());
+  }
 }
 
 async function refreshPlugins() {

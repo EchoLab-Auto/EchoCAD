@@ -1973,6 +1973,14 @@ pub fn update_linear_pattern(
     dir_z: f64,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
+    // Validate before snapshot (§15): wrong id/kind must not grow the undo stack.
+    {
+        let doc = state.lock_doc();
+        let f = doc.get_feature(feature_id).ok_or("feature not found")?;
+        if !matches!(f.kind, FeatureKind::LinearPattern { .. }) {
+            return Err("feature is not a LinearPattern".into());
+        }
+    }
     state.snapshot();
     let mut doc = state.lock_doc();
     let feature = doc.get_feature_mut(feature_id).ok_or("feature not found")?;
@@ -2003,6 +2011,14 @@ pub fn update_circular_pattern(
     axis_z: f64,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
+    // Validate before snapshot (§15): wrong id/kind must not grow the undo stack.
+    {
+        let doc = state.lock_doc();
+        let f = doc.get_feature(feature_id).ok_or("feature not found")?;
+        if !matches!(f.kind, FeatureKind::CircularPattern { .. }) {
+            return Err("feature is not a CircularPattern".into());
+        }
+    }
     state.snapshot();
     let mut doc = state.lock_doc();
     let feature = doc.get_feature_mut(feature_id).ok_or("feature not found")?;
@@ -2031,6 +2047,14 @@ pub fn update_mirror_params(
     plane_px: f64, plane_py: f64, plane_pz: f64,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
+    // Validate before snapshot (§15): wrong id/kind must not grow the undo stack.
+    {
+        let doc = state.lock_doc();
+        let f = doc.get_feature(feature_id).ok_or("feature not found")?;
+        if !matches!(f.kind, FeatureKind::Mirror { .. }) {
+            return Err("feature is not a Mirror".into());
+        }
+    }
     state.snapshot();
     let mut doc = state.lock_doc();
     let feature = doc.get_feature_mut(feature_id).ok_or("feature not found")?;

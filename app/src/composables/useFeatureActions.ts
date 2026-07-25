@@ -37,8 +37,11 @@ export function useFeatureActions(
     sketchStore.isLoading = true;
     try {
       sketchStore.setFeatures(await getFeatures());
-      sketchStore.setEntities(await getSketchEntities());
-      unifiedViewport.value?.refreshSketch();
+      if (unifiedViewport.value) {
+        await unifiedViewport.value.refreshSketch();
+      } else {
+        sketchStore.setEntities(await getSketchEntities());
+      }
     } finally {
       sketchStore.isLoading = false;
     }
