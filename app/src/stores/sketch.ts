@@ -266,6 +266,25 @@ export const useSketchStore = defineStore("sketch", () => {
     featureOpacities.value = {};
   }
 
+  /// Reset ALL per-document UI state. MUST be called by every entry point
+  /// that replaces the document — new/open/undo/redo, including non-UI
+  /// callers like the Agent API (§16). Putting this in the store (not in
+  /// HomeView) is the point: resets that live in one UI layer get bypassed
+  /// by every other client.
+  function resetPerDocumentState() {
+    selectedFeatureId.value = null;
+    clearAppearanceOverrides();
+    editingSketchId.value = null;
+    activeTool.value = "select";
+    selectedId.value = null;
+    showExtrudePanel.value = false;
+    edgePickMode.value = false;
+    pendingEdges.value = [];
+    pendingFilletChamferTarget.value = null;
+    measureMode.value = false;
+    measurePoints.value = [];
+  }
+
   return {
     entities,
     constraints,
@@ -299,6 +318,7 @@ export const useSketchStore = defineStore("sketch", () => {
     setFeatureColor,
     persistFeatureColor,
     clearAppearanceOverrides,
+    resetPerDocumentState,
     setFeatureOpacity,
     isEditingSketch,
     // Measurement

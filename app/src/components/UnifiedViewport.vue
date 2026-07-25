@@ -69,7 +69,7 @@ import {
   getAllSolidMeshes,
   getSketchEntities, getSketchConstraints,
   addPoint, addLine, addCircle, addArc, addSpline, addEllipse,
-  addConstraint, solveSketch, movePoint, movePointNoSnapshot, deleteEntity,
+  addConstraint, solveSketch, movePoint, movePointNoSnapshot, deleteEntityNoSnapshot,
   type RenderMesh, type EntityId,
 } from "@/commands/sketch";
 import { useSketchStore } from "@/stores/sketch";
@@ -1446,7 +1446,10 @@ async function cleanupPendingPoints() {
   pendingPointIds.value = [];
   if (ids.length === 0) return;
   for (const id of ids) {
-    try { await deleteEntity(id); } catch { /* best-effort */ }
+    // No-snapshot deletes: the whole cancelled gesture is one logical undo
+    // step (its first move_point already snapshotted); N extra snapshots
+    // would spam the stack and clobber redo mid-undo (原则3).
+    try { await deleteEntityNoSnapshot(id); } catch { /* best-effort */ }
   }
   await refreshSketch();
 }

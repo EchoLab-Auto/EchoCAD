@@ -642,7 +642,7 @@ fn point_in_triangle(p: &Point2D, a: &Point2D, b: &Point2D, c: &Point2D) -> bool
 }
 
 /// Ear-clipping triangulation with improved robustness.
-fn triangulate_ear_clip(polygon: &[Point2D]) -> Vec<[usize; 3]> {
+pub(crate) fn triangulate_ear_clip(polygon: &[Point2D]) -> Vec<[usize; 3]> {
     let n = polygon.len();
     if n < 3 {
         return Vec::new();
@@ -952,7 +952,13 @@ pub fn extract_loops(sketch: &Sketch) -> Option<Vec<Vec<Point2D>>> {
             match next {
                 Some((n, ei)) => {
                     if n == start_point {
+                        // Closing edge: tessellate it too! Without this the
+                        // final edge's curve is lost — a closing Arc degrades
+                        // to a straight chord (the loop endpoints coincide,
+                        // but the arc's intermediate points define the shape).
                         used_edges[ei] = true;
+                        let edge = &edges[ei];
+                        tessellate_edge_into(edge, current, n, sketch, &mut polygon);
                         break;
                     }
                     used_edges[ei] = true;

@@ -150,8 +150,8 @@ export interface ExtrudeRegionInfo {
   area: number;
 }
 
-export async function getExtrudeRegions(): Promise<ExtrudeRegionInfo[]> {
-  return invoke("get_extrude_regions");
+export async function getExtrudeRegions(sketchId?: FeatureId): Promise<ExtrudeRegionInfo[]> {
+  return invoke("get_extrude_regions", { sketchId: sketchId ?? null });
 }
 
 export async function previewExtrude(
@@ -379,6 +379,13 @@ export async function updateEntityProp(
 
 export async function deleteEntity(id: EntityId): Promise<boolean> {
   return invoke("delete_entity", { id });
+}
+
+/// Delete an entity without pushing an undo snapshot. Used by the
+/// draw-cancel cleanup path so canceling a gesture doesn't spam the undo
+/// stack or clobber redo mid-undo.
+export async function deleteEntityNoSnapshot(id: EntityId): Promise<boolean> {
+  return invoke("delete_entity_no_snapshot", { id });
 }
 
 export async function movePoint(

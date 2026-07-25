@@ -1,7 +1,7 @@
 //! Revolve: rotate a 2D sketch profile around an axis to create a solid.
 
-use echi_core::sketch::{Sketch, SketchEntity};
-use crate::extrude::Mesh;
+use echi_core::sketch::Sketch;
+use crate::extrude::{Mesh, Point2D};
 
 /// Revolve a sketch profile around a user-defined axis.
 ///
@@ -15,7 +15,7 @@ pub fn revolve(
     axis_start: Option<(f64, f64)>,
     axis_end: Option<(f64, f64)>,
 ) -> Option<Mesh> {
-    let profile = extract_profile(sketch)?;
+    let (profile, profile_closed) = extract_profile(sketch)?;
     if profile.len() < 2 {
         return None;
     }
@@ -43,9 +43,18 @@ pub fn revolve(
     let angle_step = total_angle / n_segments as f64;
     let n_profile = profile.len();
 
-    let total_verts = (n_segments as usize + 1) * n_profile;
-    let mut positions = Vec::with_capacity(total_verts * 3);
-    let mut normals = Vec::with_capacity(total_verts * 3);
+    // A full 360° revolution closes onto itself: generate only n_segments
+    // rings and stitch the last segment back to ring 0 (instead of emitting
+    // a duplicated final ring that leaves the mesh boundary open).
+    let is_full_revolution = (total_angle.abs() - 2.0 * std::f64::consts::PI).abs() < 1e-6;
+    let n_rings = if is_full_revolution {
+        n_segments as usize
+    } else {
+        n_segments as usize + 1
+    };
+
+    let mut positions = Vec::with_capacity(n_rings * n_profile * 3);
+    let mut normals = Vec::with_capacity(n_rings * n_profile * 3);
     let mut indices = Vec::new();
 
     // Precompute profile decomposition relative to the axis
@@ -67,8 +76,8 @@ pub fn revolve(
         })
         .collect();
 
-    // Generate vertices for each angular segment
-    for i in 0..=n_segments {
+    // Generate vertices for each angular ring
+    for i in 0..n_rings {
         let theta = i as f64 * angle_step;
         let cos_t = theta.cos();
         let sin_t = theta.sin();
@@ -103,12 +112,17 @@ pub fn revolve(
         }
     }
 
-    // Stitch adjacent profiles with quad strips (two triangles per quad)
+    // Stitch adjacent profiles with quad strips (two triangles per quad).
+    // Full revolution: the last segment wraps back to ring 0.
+    let ring_below = |i: usize| -> usize {
+        if is_full_revolution { (i + 1) % n_rings } else { i + 1 }
+    };
     for i in 0..n_segments as usize {
+        let r1 = ring_below(i);
         for j in 0..(n_profile - 1) {
             let a = (i * n_profile + j) as u32;
             let b = a + 1;
-            let c = a + n_profile as u32;
+            let c = (r1 * n_profile + j) as u32;
             let d = c + 1;
             indices.push(a);
             indices.push(c);
@@ -119,78 +133,71 @@ pub fn revolve(
         }
     }
 
-    // Closed profile: stitch the last vertices back to the first
-    if let (Some(first), Some(last)) = (profile.first(), profile.last()) {
-        let dx = first.0 - last.0;
-        let dy = first.1 - last.1;
-        if (dx * dx + dy * dy).sqrt() < 1e-6 {
-            // Profile is closed
-            for i in 0..n_segments as usize {
-                let a = (i * n_profile + n_profile - 1) as u32; // last vertex
-                let b = (i * n_profile) as u32; // first vertex
-                let c = ((i + 1) * n_profile + n_profile - 1) as u32;
-                let d = ((i + 1) * n_profile) as u32;
-                indices.push(a);
-                indices.push(c);
-                indices.push(b);
-                indices.push(b);
-                indices.push(c);
-                indices.push(d);
-            }
+    // Closed profile: stitch the last profile point back to the first on
+    // every ring (only when the extracted loop is actually closed).
+    if profile_closed {
+        for i in 0..n_segments as usize {
+            let r1 = ring_below(i);
+            let a = (i * n_profile + n_profile - 1) as u32; // last vertex
+            let b = (i * n_profile) as u32; // first vertex
+            let c = (r1 * n_profile + n_profile - 1) as u32;
+            let d = (r1 * n_profile) as u32;
+            indices.push(a);
+            indices.push(c);
+            indices.push(b);
+            indices.push(b);
+            indices.push(c);
+            indices.push(d);
         }
     }
 
-    // End caps: generate fan triangles for start (theta=0) and end (theta=total_angle)
-    // Only cap if the revolution is full 360° (closed surface)
-    let is_full_revolution = (total_angle - 2.0 * std::f64::consts::PI).abs() < 1e-6;
+    // End caps: only for PARTIAL revolves — a full 360° revolution closes
+    // onto itself (the old code added interior fin caps there and left
+    // partial revolves open, exactly backwards). Caps triangulate the
+    // profile polygon with ear-clipping, so non-convex profiles work too.
+    if !is_full_revolution && profile_closed && profile.len() >= 3 {
+        let cap_tris = crate::extrude::triangulate_ear_clip(
+            &profile.iter().map(|&(x, y)| Point2D { x, y }).collect::<Vec<_>>(),
+        );
+        let sign = if total_angle >= 0.0 { 1.0 } else { -1.0 };
 
-    if is_full_revolution {
-        // Start cap (theta = 0, cos_t=1, sin_t=0):
-        // Every profile point lies in the XY sketch plane. Triangulate the profile
-        // polygon in its original position.
-        let start_cap_center_idx = positions.len() / 3;
-        // Add center point on the axis at average along position
-        let avg_along: f64 = decomp.iter().map(|pp| pp.along).sum::<f64>() / decomp.len() as f64;
-        let cx = ax + avg_along * ux;
-        let cy = ay + avg_along * uy;
-        positions.push(cx as f32);
-        positions.push(cy as f32);
-        positions.push(0.0_f32);
-        // Cap normal points along -Z (into the start face)
-        let cap_nx = -0.0_f64;
-        let cap_ny = -0.0_f64;
-        let cap_nz = -1.0_f64 * (if total_angle > 0.0 { 1.0 } else { -1.0 });
-        normals.push(cap_nx as f32);
-        normals.push(cap_ny as f32);
-        normals.push(cap_nz as f32);
-
-        for j in 0..n_profile {
-            let a = (j) as u32;
-            let b = ((j + 1) % n_profile) as u32;
-            let c = start_cap_center_idx as u32;
-            indices.push(c);
-            indices.push(b);
-            indices.push(a);
+        // Start cap (θ=0): outward normal is −Z × sign (against the sweep).
+        for tri in &cap_tris {
+            indices.push(tri[2] as u32);
+            indices.push(tri[1] as u32);
+            indices.push(tri[0] as u32);
         }
 
-        // End cap (theta = 2π) - identical position to start for full revolution
-        let end_cap_center_idx = positions.len() / 3;
-        positions.push(cx as f32);
-        positions.push(cy as f32);
-        positions.push(0.0_f32);
-        // Cap normal points along +Z (out of the end face)
-        normals.push(0.0_f32);
-        normals.push(0.0_f32);
-        normals.push(1.0_f32 * (if total_angle > 0.0 { 1.0 } else { -1.0 }));
-
-        let last_ring_start = n_segments as usize * n_profile;
+        // End cap (θ=total): outward normal is the sweep direction at the end.
+        let ring0 = 0usize;
+        let ring_end = n_segments as usize * n_profile;
+        // Fix start-cap vertex normals to point along −Z × sign.
         for j in 0..n_profile {
-            let a = (last_ring_start + j) as u32;
-            let b = (last_ring_start + (j + 1) % n_profile) as u32;
-            let c = end_cap_center_idx as u32;
-            indices.push(c);
-            indices.push(a);
-            indices.push(b);
+            let vi = ring0 + j;
+            normals[vi * 3] = 0.0;
+            normals[vi * 3 + 1] = 0.0;
+            normals[vi * 3 + 2] = (-sign) as f32;
+        }
+        for tri in &cap_tris {
+            indices.push((ring_end + tri[0]) as u32);
+            indices.push((ring_end + tri[1]) as u32);
+            indices.push((ring_end + tri[2]) as u32);
+        }
+        // End-cap normals: sweep direction at θ=total is
+        // d(pos)/dθ = radial·(−sinθ·perp + cosθ·ẑ) — uniform (0,0,sign)
+        // direction component dominates for the cap face; use +Z × sign.
+        let theta = total_angle;
+        let (s, c) = (theta.sin(), theta.cos());
+        for j in 0..n_profile {
+            let vi = ring_end + j;
+            // Outward = rotate −Z by the remaining sweep: (−sinθ·px, −sinθ·py, cosθ)·sign
+            let nx = (-s * px) * sign;
+            let ny = (-s * py) * sign;
+            let nz = c * sign;
+            let len = (nx * nx + ny * ny + nz * nz).sqrt().max(1e-10);
+            normals[vi * 3] = (nx / len) as f32;
+            normals[vi * 3 + 1] = (ny / len) as f32;
+            normals[vi * 3 + 2] = (nz / len) as f32;
         }
     }
 
@@ -201,121 +208,43 @@ pub fn revolve(
     })
 }
 
-/// Extract a 2D profile (ordered point list) from sketch entities.
-/// The profile follows the contour formed by connected lines,
-/// or a standalone circle/arc tessellated into a polygon.
-fn extract_profile(sketch: &Sketch) -> Option<Vec<(f64, f64)>> {
-    // First, check for standalone circle — tessellate it as the profile
-    if let Some(circle_points) = tessellate_circle_revolve_profile(sketch) {
-        return Some(circle_points);
-    }
-
-    let lines: Vec<_> = sketch
-        .entities
-        .iter()
-        .filter_map(|(_, e)| match e {
-            SketchEntity::Line { start, end, .. } => Some((*start, *end)),
-            _ => None,
-        })
-        .collect();
-
-    if lines.is_empty() {
-        return None;
-    }
-
-    let mut points: Vec<(f64, f64)> = Vec::new();
-    let mut used = vec![false; lines.len()];
-
-    // Start with the first line
-    let first = lines[0];
-    used[0] = true;
-    if let (Some(p_start), Some(p_end)) =
-        (sketch.get_point(first.0), sketch.get_point(first.1))
-    {
-        points.push((p_start.x, p_start.y));
-        points.push((p_end.x, p_end.y));
-    } else {
-        return None;
-    }
-
-    // Follow the chain
-    let mut current_id = first.1;
-    loop {
-        let mut found = false;
-        for (i, &(start, end)) in lines.iter().enumerate() {
-            if used[i] {
-                continue;
-            }
-            if start == current_id {
-                used[i] = true;
-                if let Some(p) = sketch.get_point(end) {
-                    points.push((p.x, p.y));
-                    current_id = end;
-                    found = true;
-                }
-            } else if end == current_id {
-                used[i] = true;
-                if let Some(p) = sketch.get_point(start) {
-                    points.push((p.x, p.y));
-                    current_id = start;
-                    found = true;
+/// Extract a 2D profile (ordered point list) from sketch entities, plus a
+/// flag telling whether the profile forms a CLOSED loop. Uses the shared
+/// loop extractor, so arcs, circles, splines and mixed line/arc chains all
+/// work — previously only straight lines were followed and arcs silently
+/// truncated the profile (原则8).
+fn extract_profile(sketch: &Sketch) -> Option<(Vec<(f64, f64)>, bool)> {
+    let loops = crate::extrude::extract_loops(sketch)?;
+    // Revolve uses the largest-area loop as the profile.
+    let mut best: Option<(Vec<(f64, f64)>, bool)> = None;
+    let mut best_area = 0.0f64;
+    for lp in loops {
+        let mut area = 0.0;
+        let n = lp.len();
+        for i in 0..n {
+            let j = (i + 1) % n;
+            area += lp[i].x * lp[j].y - lp[j].x * lp[i].y;
+        }
+        let area = area.abs() / 2.0;
+        if area > best_area {
+            best_area = area;
+            // A closed loop from extract_loops ends where it started
+            // (closing edge tessellated back to the start point). Strip the
+            // duplicate and remember closure.
+            let mut pts: Vec<(f64, f64)> = lp.iter().map(|p| (p.x, p.y)).collect();
+            let mut closed = false;
+            if pts.len() >= 2 {
+                let f = pts[0];
+                let l = pts[pts.len() - 1];
+                if ((f.0 - l.0).powi(2) + (f.1 - l.1).powi(2)).sqrt() < 1e-9 {
+                    pts.pop();
+                    closed = true;
                 }
             }
-            if found {
-                break;
-            }
-        }
-        if !found {
-            break;
+            best = Some((pts, closed));
         }
     }
-
-    // Close the profile by removing the last duplicate if it matches the first
-    if points.len() >= 3 {
-        let first_pt = points[0];
-        let last_pt = points[points.len() - 1];
-        let dx = first_pt.0 - last_pt.0;
-        let dy = first_pt.1 - last_pt.1;
-        if (dx * dx + dy * dy).sqrt() < 1e-6 {
-            points.pop();
-        }
-    }
-
-    Some(points)
-}
-
-/// Tessellate a standalone circle into profile points for revolve.
-fn tessellate_circle_revolve_profile(sketch: &Sketch) -> Option<Vec<(f64, f64)>> {
-    let mut circle: Option<(f64, f64, f64)> = None;
-
-    for entity in sketch.entities.values() {
-        match entity {
-            SketchEntity::Line { construction, .. } | SketchEntity::Spline { construction, .. } => {
-                if !*construction { return None; } // Has a real line — not a standalone circle
-            }
-            SketchEntity::Circle { center, radius, construction } => {
-                if *construction { continue; }
-                if circle.is_some() { return None; }
-                if let Some(cp) = sketch.get_point(*center) {
-                    circle = Some((cp.x, cp.y, *radius));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let (cx, cy, r) = circle?;
-    if r <= 1e-10 { return None; }
-
-    let n_seg = 64;
-    let points: Vec<(f64, f64)> = (0..=n_seg)
-        .map(|i| {
-            let a = 2.0 * std::f64::consts::PI * i as f64 / n_seg as f64;
-            (cx + r * a.cos(), cy + r * a.sin())
-        })
-        .collect();
-
-    Some(points)
+    best
 }
 
 #[cfg(test)]
@@ -348,8 +277,71 @@ mod tests {
         for &idx in &mesh.indices {
             assert!(idx < vc, "index {} out of bounds", idx);
         }
-        // Full revolution should produce caps (more indices than just side walls)
+        // Full revolution: closed side surface, no caps needed — but the
+        // stitch count should still be substantial.
         assert!(mesh.indices.len() > 100);
+    }
+
+    #[test]
+    fn revolve_partial_has_caps_full_does_not() {
+        use std::collections::HashMap;
+        let sketch = make_rect_profile_right_of_y_axis();
+
+        // Partial (180°): must have caps — the mesh should be closed, i.e.
+        // every undirected edge is shared by exactly 2 triangles.
+        let partial = revolve(&sketch, std::f64::consts::PI, 16, None, None)
+            .expect("partial revolve");
+        let mut edge_count: HashMap<(u32, u32), u32> = HashMap::new();
+        for tri in partial.indices.chunks_exact(3) {
+            for e in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                let key = if e.0 < e.1 { (e.0, e.1) } else { (e.1, e.0) };
+                *edge_count.entry(key).or_default() += 1;
+            }
+        }
+        let open_edges = edge_count.values().filter(|&&c| c != 2).count();
+        assert_eq!(open_edges, 0, "partial revolve must be watertight (caps present)");
+
+        // Full (360°): no caps — side surface closes onto itself; also watertight.
+        let full = revolve(&sketch, 2.0 * std::f64::consts::PI, 16, None, None)
+            .expect("full revolve");
+        let mut edge_count2: HashMap<(u32, u32), u32> = HashMap::new();
+        for tri in full.indices.chunks_exact(3) {
+            for e in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                let key = if e.0 < e.1 { (e.0, e.1) } else { (e.1, e.0) };
+                *edge_count2.entry(key).or_default() += 1;
+            }
+        }
+        let open_edges2 = edge_count2.values().filter(|&&c| c != 2).count();
+        assert_eq!(open_edges2, 0, "full revolve must be watertight (no cap fins)");
+    }
+
+    #[test]
+    fn revolve_profile_with_arc() {
+        // Profile with a rounded (arc) edge: lines + semicircle arc forming
+        // a "D" shape right of the Y axis. Arc must be tessellated into the
+        // profile — previously line-only extraction silently dropped it.
+        let mut sketch = Sketch::new();
+        let p0 = sketch.add_point(1.0, 0.0);
+        let p1 = sketch.add_point(2.0, 0.0);
+        let pc = sketch.add_point(2.0, 0.5);
+        sketch.add_line(p0, p1);
+        sketch.add_arc(pc, 0.5, -std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2);
+        // Close back to p0 with a line from arc end (2,1) to (1,0)? Use a
+        // simple closed chain: line p0->p1, arc p1(2,0)→(2,1) via semicircle,
+        // line (2,1)->(1,1), line (1,1)->(1,0).
+        let p2 = sketch.add_point(2.0, 1.0);
+        let p3 = sketch.add_point(1.0, 1.0);
+        sketch.add_line(p2, p3);
+        sketch.add_line(p3, p0);
+
+        let mesh = revolve(&sketch, 2.0 * std::f64::consts::PI, 16, None, None)
+            .expect("D-profile revolve should succeed");
+        assert!(mesh.vertex_count() > 0);
+        assert!(!mesh.indices.is_empty());
+        // Arc tessellation means many more than 4 profile points (was 4 with
+        // line-only extraction → coarse chord shape).
+        let rings = mesh.vertex_count();
+        assert!(rings > 16 * 8, "arc should add tessellation points (got {rings} verts)");
     }
 
     #[test]

@@ -185,7 +185,11 @@ pub trait BrepKernel {
         if count < 2 {
             return self.tessellate(solid, 0.01);
         }
-        let angle_step = total_angle_deg.to_radians() / count as f64;
+        // Full-revolution: divide by count (no duplicate endpoint instance).
+        // Partial: divide by (count-1) to span the full requested angle.
+        let full_turn = (total_angle_deg - 360.0).abs() < 1e-9;
+        let divisor = if full_turn { count } else { count - 1 } as f64;
+        let angle_step = total_angle_deg.to_radians() / divisor;
         let axis_origin = [axis_ox, axis_oy, axis_oz];
         let axis_dir = [axis_dx, axis_dy, axis_dz];
         let mut mesh = self.tessellate(solid, 0.01)?;

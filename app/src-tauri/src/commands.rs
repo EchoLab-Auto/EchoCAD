@@ -334,6 +334,8 @@ fn regenerate_state(state: &AppState) {
     let mut result = regenerate_with(&doc, Some(solid_gen), brep_kernel, None);
     reinject_imported(&mut result, state);
     *state.lock_regen() = result;
+    // We just regenerated everything — any pending dirty flag is satisfied.
+    state.regen_dirty.store(false, Ordering::SeqCst);
 }
 
 /// Full regeneration from an already-locked document reference.
@@ -343,6 +345,7 @@ fn regen_locked(doc: &Document, state: &AppState) {
     let mut result = regenerate_with(doc, Some(solid_gen), brep_kernel, None);
     reinject_imported(&mut result, state);
     *state.lock_regen() = result;
+    state.regen_dirty.store(false, Ordering::SeqCst);
 }
 
 /// Incremental regeneration: only re-evaluate the changed feature and its
@@ -356,6 +359,10 @@ fn incremental_regen_locked(doc: &Document, state: &AppState, changed_id: Featur
     let mut result = regenerate_with(doc, Some(solid_gen), brep_kernel, Some(&prev));
     reinject_imported(&mut result, state);
     *state.lock_regen() = result;
+    // NOTE: regen_dirty is intentionally NOT cleared here — an incremental
+    // regen only covers one feature's dirty set, while the flag may also
+    // reflect sketch mutations whose dependents weren't re-evaluated. The
+    // next mesh read (regen_if_dirty) will do the full regen if needed.
 }
 
 // ── Feature node projection ─────────────────────────────────────
@@ -1152,6 +1159,16 @@ pub fn delete_entity(id: EntityId, state: tauri::State<AppState>) -> bool {
     state.with_active_sketch_mut(|s| !s.delete_entity_cascade(id).is_empty()).unwrap_or(false)
 }
 
+/// Delete an entity WITHOUT an undo snapshot. Used by the draw-cancel
+/// cleanup path: the pending points were created moments ago by the same
+/// gesture, and undoing that gesture as a whole already covers them —
+/// N extra snapshots would spam the stack and (worse) clear the redo
+/// stack mid-undo (原则3).
+#[tauri::command]
+pub fn delete_entity_no_snapshot(id: EntityId, state: tauri::State<AppState>) -> bool {
+    state.with_active_sketch_mut(|s| !s.delete_entity_cascade(id).is_empty()).unwrap_or(false)
+}
+
 #[tauri::command]
 pub fn clear_sketch(state: tauri::State<AppState>) {
     state.snapshot_if_sketch();
@@ -1216,12 +1233,17 @@ pub struct ExtrudeRegionInfo {
 /// Return available extrude regions (closed loops) from the active sketch.
 /// Each loop is independently selectable — the extrude engine will determine
 /// outer/hole relationships at extrude time based on which loops are selected.
+///
+/// Takes an explicit `sketch_id` so the region list matches the sketch the
+/// extrude will actually target (the tree-selected sketch), NOT whatever
+/// happens to be backend-active (原则1/14 — the previous implicit-active
+/// behavior listed one sketch's loops while extruding another's).
 #[tauri::command]
-pub fn get_extrude_regions(state: tauri::State<AppState>) -> Vec<ExtrudeRegionInfo> {
+pub fn get_extrude_regions(sketch_id: Option<FeatureId>, state: tauri::State<AppState>) -> Vec<ExtrudeRegionInfo> {
     use echi_geom::extrude::{self, Point2D};
 
     let doc = state.lock_doc();
-    let sketch_id = match *state.lock_sketch() {
+    let sketch_id = match sketch_id.or(*state.lock_sketch()) {
         Some(id) => id,
         None => return vec![],
     };
@@ -1653,14 +1675,16 @@ pub fn import_step(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> 
 
         // Store in imported_meshes so every future regen re-injects them
         // (regen pipeline can't produce them — no backing document feature).
-        // Synthetic FeatureId range avoids collisions with document IDs.
+        // Synthetic FeatureIds live in [2^52 - 1000, 2^52): safely above any
+        // real document id yet below 2^53, so they survive the JSON round
+        // trip to JavaScript exactly (f64 can't represent ids near u64::MAX).
         {
             let mut imported = state.imported_meshes.lock()
                 .map_err(|e| format!("lock error: {e}"))?;
             let mut result = state.lock_regen();
-            let base = FeatureId(u64::MAX - 1000);
+            let base = FeatureId(1u64 << 52);
             for (i, rm) in render_meshes.iter().enumerate() {
-                let fid = FeatureId(base.0 - i as u64);
+                let fid = FeatureId(base.0 - 1 - i as u64);
                 let mesh = echi_geom::Mesh {
                     positions: rm.positions.clone(),
                     normals: rm.normals.clone(),

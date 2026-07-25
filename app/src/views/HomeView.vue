@@ -163,7 +163,7 @@ const layoutRoot = ref<HTMLDivElement | null>(null);
 
 const {
   doExtrude, cancelExtrude, onExtrudeConfigChange, showExtrudePanel,
-  extrudeRegions, onExtrudeRegionChange,
+  extrudeRegions, onExtrudeRegionChange, resetTransientFeatureState,
   revolve,
   confirmEdgePick, cancelEdgePick,
   booleanDialog, confirmBoolean, cancelBoolean,
@@ -340,17 +340,16 @@ async function updateParam(id: ParameterId, event: Event) {
 // ── Document operations ───────────────────────────────────────────
 
 /// Reset all per-document UI state when the document is REPLACED
-/// (new/open/undo/redo). Backend feature ids restart from 1, so any state
-/// keyed by FeatureId (appearance overrides, selection, editing session)
-/// would alias onto unrelated features of the new document (原则1/2.1).
+/// (new/open/undo/redo). Delegates to the store so non-UI entry points
+/// (Agent API) go through the same path (§16). Also clears transient
+/// feature-creation state (extrude panel preview, boolean dialog) and any
+/// open dialogs referencing old-document ids.
 function resetPerDocumentState() {
-  sketchStore.selectedFeatureId = null;
-  sketchStore.clearAppearanceOverrides();
-  // Exit any sketch-edit session — the user never chose to edit the new
-  // document's same-id sketch.
-  sketchStore.setEditingSketch(null);
-  sketchStore.setTool("select");
-  sketchStore.select(null);
+  sketchStore.resetPerDocumentState();
+  resetTransientFeatureState();
+  offsetDialogOpen.value = false;
+  activeDialog.value = null;
+  cancelCascade();
 }
 
 async function clearDoc() {

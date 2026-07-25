@@ -100,9 +100,15 @@ pub fn regenerate_with(
     previous: Option<&RegenResult>,
 ) -> RegenResult {
     let mut result = if let Some(prev) = previous {
-        // Incremental: start from previous result, only recompute dirty features
+        // Incremental: start from previous result, only recompute dirty features.
+        // Keep errors of CLEAN features (still accurate — they weren't
+        // re-evaluated) and of no other set: dirty features get their error
+        // re-recorded below; deleted features' errors are dropped. Clearing
+        // ALL errors here made previously-failed features silently "heal"
+        // and sent their dependents to the misleading "target not yet
+        // evaluated" message (原则8).
         let mut r = prev.clone();
-        r.errors.clear(); // re-evaluate errors for dirty features
+        r.errors.retain(|id, _| !r.dirty.contains(id) && doc.get_feature(*id).is_some());
         r
     } else {
         RegenResult::default()
@@ -372,7 +378,14 @@ fn regenerate_feature(
                 .or(brep_result)
                 .or_else(|| sweep_mesh(profile, path));
             match mesh {
-                Some(mesh) => {
+                Some(mut mesh) => {
+                    // sweep_mesh builds with the path in local XY; place the
+                    // result on the PATH sketch's plane (原则5).
+                    let path_plane = doc.get_feature(*path_sketch_id)
+                        .and_then(|f| f.plane())
+                        .cloned()
+                        .unwrap_or_default();
+                    echi_geom::extrude::transform_mesh_to_world(&mut mesh, &path_plane);
                     result.solids.insert(feature.id(), mesh);
                     result.current_solid = Some(feature.id());
                     Ok(())
@@ -480,7 +493,14 @@ fn regenerate_feature(
                 .or_else(|| revolve(sketch, angle_rad, 48, axis_start, axis_end));
 
             match mesh {
-                Some(mesh) => {
+                Some(mut mesh) => {
+                    // revolve() builds in sketch-local XY; place the solid on
+                    // the sketch's actual plane like extrude does (原则5).
+                    let plane = doc.get_feature(*sketch_id)
+                        .and_then(|f| f.plane())
+                        .cloned()
+                        .unwrap_or_default();
+                    echi_geom::extrude::transform_mesh_to_world(&mut mesh, &plane);
                     result.solids.insert(feature.id(), mesh);
                     result.current_solid = Some(feature.id());
                     Ok(())

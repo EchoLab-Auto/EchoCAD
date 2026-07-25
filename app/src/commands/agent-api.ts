@@ -76,6 +76,7 @@ import type {
   FeatureNode, SketchEntity, Constraint, ExtrudeRegionInfo,
   RenderMesh, PluginInfo, GeneratorInfo, SolidMeshEntry,
 } from "./sketch";
+import { useSketchStore } from "@/stores/sketch";
 
 export type { FeatureId, EntityId, ParameterId };
 
@@ -103,6 +104,18 @@ export interface FeatureInfo {
 
 export class AgentCAD {
   private activeSketchId: FeatureId | null = null;
+
+  /// Reset UI state after any document-replacing operation so this client
+  /// obeys the same §16 invariant as the UI (the store reset is the single
+  /// shared implementation — never reimplement per caller).
+  private resetAfterDocumentReplace() {
+    this.activeSketchId = null;
+    try {
+      useSketchStore().resetPerDocumentState();
+    } catch {
+      // Pinia not active yet (e.g. very early startup) — nothing to reset.
+    }
+  }
 
   // ═══════════════════════════════════════════════════════════════
   // Sketch & Document
@@ -256,10 +269,10 @@ export class AgentCAD {
     return addExtrudeFeature(sketchId, "one_side", 0, draftAngle, depth, selectedRegions ?? null) as Promise<FeatureId>;
   }
 
-  /** List the closed loops in the active sketch available for extrusion.
+  /** List the closed loops in a sketch available for extrusion.
    *  Indices returned here are what `extrude(..., selectedRegions)` expects. */
-  async getExtrudeRegions(): Promise<ExtrudeRegionInfo[]> {
-    return getExtrudeRegions();
+  async getExtrudeRegions(sketchId?: FeatureId): Promise<ExtrudeRegionInfo[]> {
+    return getExtrudeRegions(sketchId);
   }
 
   /** Preview an extrusion without committing it to the document. */
@@ -410,8 +423,8 @@ export class AgentCAD {
     return updateConstraintValue(constraint);
   }
 
-  async undo(): Promise<void> { await undo(); }
-  async redo(): Promise<void> { await redo(); }
+  async undo(): Promise<void> { await undo(); this.resetAfterDocumentReplace(); }
+  async redo(): Promise<void> { await redo(); this.resetAfterDocumentReplace(); }
   /** Query undo/redo availability. */
   async canUndoRedo(): Promise<[boolean, boolean]> { return canUndoRedo(); }
 
@@ -502,11 +515,11 @@ export class AgentCAD {
   /** Save the current project to a specific path. */
   async saveTo(path: string): Promise<void> { await saveProjectTo(path); }
   /** Load a project via file dialog. */
-  async load(): Promise<void> { await loadProjectCmd(); }
+  async load(): Promise<void> { await loadProjectCmd(); this.resetAfterDocumentReplace(); }
   /** Load a project from a specific path. */
-  async loadFrom(path: string): Promise<void> { await loadProjectFrom(path); }
+  async loadFrom(path: string): Promise<void> { await loadProjectFrom(path); this.resetAfterDocumentReplace(); }
   /** Clear the entire document (new empty part). */
-  async clearAll(): Promise<void> { await clearDocument(); }
+  async clearAll(): Promise<void> { await clearDocument(); this.resetAfterDocumentReplace(); }
 
   /** Export the merged solid as STL. Returns the file path. */
   async exportStl(): Promise<string> { return exportStl(); }

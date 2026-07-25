@@ -57,7 +57,13 @@ pub fn circular_pattern(
     let aux = axis_dx / alen;
     let auy = axis_dy / alen;
     let auz = axis_dz / alen;
-    let angle_step = total_angle_deg.to_radians() / (count - 1).max(1) as f64;
+    // Full-revolution patterns divide by count so the last instance does NOT
+    // land on top of the first (0/90/180/270 for count=4). Partial patterns
+    // divide by (count-1) so instances span the full requested angle —
+    // same convention as the B-rep and OCCT paths.
+    let full_turn = (total_angle_deg - 360.0).abs() < 1e-9;
+    let divisor = if full_turn { count } else { (count - 1).max(1) } as f64;
+    let angle_step = total_angle_deg.to_radians() / divisor;
 
     let mut result = Mesh::default();
     let base_verts = mesh.vertex_count();
@@ -149,8 +155,13 @@ pub fn mirror_across_plane(
         result.normals.push((mesh.normals[idx + 1] as f64 - 2.0 * ndist * uy) as f32);
         result.normals.push((mesh.normals[idx + 2] as f64 - 2.0 * ndist * uz) as f32);
     }
-    for &idx in &mesh.indices {
-        result.indices.push(off + idx);
+    // Reflection flips handedness — the mirrored copy's triangles must be
+    // wound the opposite way or its faces point inward (signed volume
+    // cancels to ≈0 and downstream booleans misclassify it).
+    for tri in mesh.indices.chunks_exact(3) {
+        result.indices.push(off + tri[0]);
+        result.indices.push(off + tri[2]);
+        result.indices.push(off + tri[1]);
     }
     result
 }
@@ -195,6 +206,29 @@ mod tests {
             "NaN in positions"
         );
         assert!(!m.normals.iter().any(|v| v.is_nan()), "NaN in normals");
+    }
+
+    /// Signed volume via the divergence theorem — negative/inverted winding
+    /// shows up as a negative or cancelled volume.
+    fn signed_volume(m: &Mesh) -> f64 {
+        let mut vol = 0.0;
+        for tri in m.indices.chunks_exact(3) {
+            let p = |i: u32| {
+                let j = i as usize * 3;
+                [
+                    m.positions[j] as f64,
+                    m.positions[j + 1] as f64,
+                    m.positions[j + 2] as f64,
+                ]
+            };
+            let a = p(tri[0]);
+            let b = p(tri[1]);
+            let c = p(tri[2]);
+            vol += a[0] * (b[1] * c[2] - b[2] * c[1])
+                - a[1] * (b[0] * c[2] - b[2] * c[0])
+                + a[2] * (b[0] * c[1] - b[1] * c[0]);
+        }
+        vol / 6.0
     }
 
     fn assert_indices_in_bounds(m: &Mesh) {
@@ -319,6 +353,47 @@ mod tests {
         let result = circular_pattern(&cube, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1, 360.0);
         assert_eq!(result.vertex_count(), cube.vertex_count());
         assert_no_nan(&result);
+    }
+
+    #[test]
+    fn circular_pattern_full_360_no_duplicate_last_instance() {
+        // With total_angle=360 and count=4, instances must be at 0/90/180/270 —
+        // NOT 0/120/240/360 where the 4th coincides with the 1st.
+        // Compare instance centroids (individual vertices may lie on the axis).
+        let cube = cube_mesh();
+        let result = circular_pattern(&cube, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 4, 360.0);
+        let nv = cube.vertex_count();
+        let centroid = |instance: usize| {
+            let mut c = [0.0f64; 3];
+            for vi in 0..nv {
+                let j = (instance * nv + vi) * 3;
+                c[0] += result.positions[j] as f64;
+                c[1] += result.positions[j + 1] as f64;
+                c[2] += result.positions[j + 2] as f64;
+            }
+            [c[0] / nv as f64, c[1] / nv as f64, c[2] / nv as f64]
+        };
+        let c0 = centroid(0);
+        let c3 = centroid(3);
+        let dist = ((c0[0] - c3[0]).powi(2) + (c0[1] - c3[1]).powi(2) + (c0[2] - c3[2]).powi(2)).sqrt();
+        assert!(
+            dist > 0.5,
+            "last instance must not coincide with the first (centroid dist={dist})"
+        );
+    }
+
+    #[test]
+    fn mirror_preserves_signed_volume() {
+        // Reflection flips handedness; winding must be inverted on the
+        // mirrored half or the signed volume cancels to ≈0.
+        let cube = cube_mesh();
+        let cube_vol = signed_volume(&cube);
+        let mirrored = mirror_across_plane(&cube, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0);
+        let mirrored_vol = signed_volume(&mirrored);
+        assert!(
+            (mirrored_vol - 2.0 * cube_vol).abs() < 1e-4 * cube_vol.max(1.0),
+            "mirrored volume should be 2× original (cube={cube_vol}, mirrored={mirrored_vol})"
+        );
     }
 
     #[test]

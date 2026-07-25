@@ -1,15 +1,16 @@
 //! Sweep: extrude a profile along a 3D path with Frenet frame orientation.
 
-use echi_core::sketch::{Sketch, SketchEntity};
-use crate::extrude::Mesh;
+use echi_core::sketch::Sketch;
+use crate::extrude::{Mesh, Point2D};
 
 /// Sweep a profile sketch along a path sketch.
 ///
 /// The profile is placed perpendicular to the path tangent at each vertex,
 /// oriented using Frenet frames. Adjacent profile copies are stitched with
-/// triangle strips, and end caps are generated.
+/// triangle strips; open paths get ear-clipped end caps, closed paths are
+/// stitched into a seamless torus-like surface.
 pub fn sweep_mesh(profile_sketch: &Sketch, path_sketch: &Sketch) -> Option<Mesh> {
-    let path = extract_path(path_sketch)?;
+    let (path, path_closed) = extract_path(path_sketch)?;
     if path.len() < 2 {
         return None;
     }
@@ -19,7 +20,8 @@ pub fn sweep_mesh(profile_sketch: &Sketch, path_sketch: &Sketch) -> Option<Mesh>
         return None;
     }
 
-    // Convert 2D path to 3D (path lies in XY plane, sweep extrudes into Z)
+    // Convert 2D path to 3D (path lies in the sketch's local XY plane; the
+    // caller transforms the result to the sketch's world plane afterwards).
     let path_3d: Vec<(f64, f64, f64)> = path.iter().map(|&(x, y)| (x, y, 0.0)).collect();
 
     // Compute arc-length parameterization of the path
@@ -48,6 +50,12 @@ pub fn sweep_mesh(profile_sketch: &Sketch, path_sketch: &Sketch) -> Option<Mesh>
     let n_profile = profile.len();
     let n_path = path_3d.len();
 
+    // Profile centroid — side normals point radially outward from it
+    // (the old code used the path tangent, which lies IN the surface plane).
+    let (pcx, pcy) = profile.iter().fold((0.0, 0.0), |(ax, ay), p| (ax + p.0, ay + p.1));
+    let pcx = pcx / n_profile as f64;
+    let pcy = pcy / n_profile as f64;
+
     let mut positions = Vec::with_capacity(n_path * n_profile * 3);
     let mut normals = Vec::with_capacity(n_path * n_profile * 3);
     let mut indices = Vec::new();
@@ -68,23 +76,32 @@ pub fn sweep_mesh(profile_sketch: &Sketch, path_sketch: &Sketch) -> Option<Mesh>
             positions.push(wy as f32);
             positions.push(wz as f32);
 
-            // Normal at this point is the tangent direction (outward from the profile)
-            let (tx, ty, tz) = frame.tangent;
-            normals.push(tx as f32);
-            normals.push(ty as f32);
-            normals.push(tz as f32);
+            // Side normal: radial from the profile centroid, mapped into the
+            // frame (lies perpendicular to the swept surface).
+            let rx = prof_x - pcx;
+            let ry = prof_y - pcy;
+            let rlen = (rx * rx + ry * ry).sqrt().max(1e-10);
+            let onx = (rx / rlen) * nx + (ry / rlen) * bx;
+            let ony = (rx / rlen) * ny + (ry / rlen) * by;
+            let onz = (rx / rlen) * nz + (ry / rlen) * bz;
+            normals.push(onx as f32);
+            normals.push(ony as f32);
+            normals.push(onz as f32);
         }
     }
 
-    // Stitch adjacent profiles with triangles
-    for path_i in 0..(n_path - 1) {
+    // Stitch adjacent profiles with triangles. Closed paths wrap the last
+    // profile back to the first (seamless torus); open paths stop at n-1.
+    let seg_count = if path_closed { n_path } else { n_path - 1 };
+    for path_i in 0..seg_count {
+        let next_i = (path_i + 1) % n_path;
         for prof_j in 0..n_profile {
             let next_j = (prof_j + 1) % n_profile;
 
             let a = (path_i * n_profile + prof_j) as u32;
             let b = (path_i * n_profile + next_j) as u32;
-            let c = ((path_i + 1) * n_profile + prof_j) as u32;
-            let d = ((path_i + 1) * n_profile + next_j) as u32;
+            let c = (next_i * n_profile + prof_j) as u32;
+            let d = (next_i * n_profile + next_j) as u32;
 
             indices.push(a);
             indices.push(c);
@@ -95,47 +112,40 @@ pub fn sweep_mesh(profile_sketch: &Sketch, path_sketch: &Sketch) -> Option<Mesh>
         }
     }
 
-    // End caps
-    // Start cap: use the first profile
-    let start_center_idx = positions.len() / 3;
-    let (cx, cy, cz) = path_3d[0];
-    let (nx, ny, nz) = frames[0].tangent;
-    // Cap center slightly offset along the negative tangent
-    positions.push(cx as f32);
-    positions.push(cy as f32);
-    positions.push(cz as f32);
-    normals.push(-nx as f32);
-    normals.push(-ny as f32);
-    normals.push(-nz as f32);
+    // End caps only for OPEN paths, ear-clipped so non-convex profiles work
+    // (the old centroid fan spilled outside L-shaped profiles).
+    if !path_closed {
+        let cap_tris = crate::extrude::triangulate_ear_clip(
+            &profile.iter().map(|&(x, y)| Point2D { x, y }).collect::<Vec<_>>(),
+        );
 
-    for j in 0..n_profile {
-        let a = (j) as u32;
-        let b = ((j + 1) % n_profile) as u32;
-        let c = start_center_idx as u32;
-        indices.push(c);
-        indices.push(b);
-        indices.push(a);
-    }
+        // Start cap (faces −tangent): reverse winding
+        for tri in &cap_tris {
+            indices.push(tri[2] as u32);
+            indices.push(tri[1] as u32);
+            indices.push(tri[0] as u32);
+        }
+        let (tnx, tny, tnz) = frames[0].tangent;
+        for j in 0..n_profile {
+            normals[j * 3] = -tnx as f32;
+            normals[j * 3 + 1] = -tny as f32;
+            normals[j * 3 + 2] = -tnz as f32;
+        }
 
-    // End cap: use the last profile
-    let end_center_idx = positions.len() / 3;
-    let (cx, cy, cz) = path_3d[n_path - 1];
-    let (nx, ny, nz) = frames[n_path - 1].tangent;
-    positions.push(cx as f32);
-    positions.push(cy as f32);
-    positions.push(cz as f32);
-    normals.push(nx as f32);
-    normals.push(ny as f32);
-    normals.push(nz as f32);
-
-    let end_offset = (n_path - 1) * n_profile;
-    for j in 0..n_profile {
-        let a = (end_offset + j) as u32;
-        let b = (end_offset + (j + 1) % n_profile) as u32;
-        let c = end_center_idx as u32;
-        indices.push(c);
-        indices.push(a);
-        indices.push(b);
+        // End cap (faces +tangent)
+        let end_offset = (n_path - 1) * n_profile;
+        for tri in &cap_tris {
+            indices.push((end_offset + tri[0]) as u32);
+            indices.push((end_offset + tri[1]) as u32);
+            indices.push((end_offset + tri[2]) as u32);
+        }
+        let (enx, eny, enz) = frames[n_path - 1].tangent;
+        for j in 0..n_profile {
+            let vi = end_offset + j;
+            normals[vi * 3] = enx as f32;
+            normals[vi * 3 + 1] = eny as f32;
+            normals[vi * 3 + 2] = enz as f32;
+        }
     }
 
     Some(Mesh {
@@ -286,7 +296,37 @@ fn compute_frenet_frames(
     frames
 }
 
-fn extract_path(sketch: &Sketch) -> Option<Vec<(f64, f64)>> {
+/// Extract the sweep path as an ordered point list, plus whether it is a
+/// CLOSED loop. Uses the shared loop extractor so arcs, splines and circles
+/// all work (a circular path yields a closed loop — torus-like sweeps).
+/// Falls back to a raw line-chain walk for degenerate 2-point paths that
+/// the loop extractor drops (a polygon needs ≥3 points to count as a loop).
+fn extract_path(sketch: &Sketch) -> Option<(Vec<(f64, f64)>, bool)> {
+    if let Some(loops) = crate::extrude::extract_loops(sketch) {
+        // The path is the chain with the most points.
+        let mut best: Option<(Vec<(f64, f64)>, bool)> = None;
+        for lp in loops {
+            let mut pts: Vec<(f64, f64)> = lp.iter().map(|p| (p.x, p.y)).collect();
+            let mut closed = false;
+            if pts.len() >= 2 {
+                let f = pts[0];
+                let l = pts[pts.len() - 1];
+                if ((f.0 - l.0).powi(2) + (f.1 - l.1).powi(2)).sqrt() < 1e-9 {
+                    pts.pop();
+                    closed = true;
+                }
+            }
+            if pts.len() >= 2 && best.as_ref().map_or(true, |(b, _)| pts.len() > b.len()) {
+                best = Some((pts, closed));
+            }
+        }
+        if let Some(b) = best {
+            return Some(b);
+        }
+    }
+
+    // Fallback: single-line or 2-point chains the loop extractor ignores.
+    use echi_core::sketch::SketchEntity;
     let lines: Vec<_> = sketch
         .entities
         .iter()
@@ -298,7 +338,6 @@ fn extract_path(sketch: &Sketch) -> Option<Vec<(f64, f64)>> {
     if lines.is_empty() {
         return None;
     }
-
     let mut points = Vec::new();
     let mut used = vec![false; lines.len()];
     let first = lines[0];
@@ -309,7 +348,6 @@ fn extract_path(sketch: &Sketch) -> Option<Vec<(f64, f64)>> {
     } else {
         return None;
     }
-
     let mut current = first.1;
     loop {
         let mut found = false;
@@ -340,78 +378,41 @@ fn extract_path(sketch: &Sketch) -> Option<Vec<(f64, f64)>> {
             break;
         }
     }
-    Some(points)
+    if points.len() >= 2 {
+        Some((points, false))
+    } else {
+        None
+    }
 }
 
-/// Extract a closed 2D profile from sketch entities, following connected edges.
+/// Extract a closed 2D profile from sketch entities. Uses the shared loop
+/// extractor (arcs/circles/splines supported); takes the largest-area loop.
 fn extract_closed_profile(sketch: &Sketch) -> Option<Vec<(f64, f64)>> {
-    let lines: Vec<_> = sketch
-        .entities
-        .iter()
-        .filter_map(|(_, e)| match e {
-            SketchEntity::Line { start, end, .. } => Some((*start, *end)),
-            _ => None,
-        })
-        .collect();
-
-    if lines.is_empty() {
-        return None;
-    }
-
-    let mut points: Vec<(f64, f64)> = Vec::new();
-    let mut used = vec![false; lines.len()];
-
-    let first = lines[0];
-    used[0] = true;
-    if let (Some(ps), Some(pe)) = (sketch.get_point(first.0), sketch.get_point(first.1)) {
-        points.push((ps.x, ps.y));
-        points.push((pe.x, pe.y));
-    } else {
-        return None;
-    }
-
-    let mut current = first.1;
-    loop {
-        let mut found = false;
-        for (i, &(s, e)) in lines.iter().enumerate() {
-            if used[i] {
-                continue;
-            }
-            if s == current {
-                used[i] = true;
-                if let Some(p) = sketch.get_point(e) {
-                    points.push((p.x, p.y));
-                    current = e;
-                    found = true;
-                }
-            } else if e == current {
-                used[i] = true;
-                if let Some(p) = sketch.get_point(s) {
-                    points.push((p.x, p.y));
-                    current = s;
-                    found = true;
+    let loops = crate::extrude::extract_loops(sketch)?;
+    let mut best: Option<Vec<(f64, f64)>> = None;
+    let mut best_area = 0.0f64;
+    for lp in loops {
+        let mut area = 0.0;
+        let n = lp.len();
+        for i in 0..n {
+            let j = (i + 1) % n;
+            area += lp[i].x * lp[j].y - lp[j].x * lp[i].y;
+        }
+        let area = area.abs() / 2.0;
+        if area > best_area {
+            best_area = area;
+            let mut pts: Vec<(f64, f64)> = lp.iter().map(|p| (p.x, p.y)).collect();
+            if pts.len() >= 2 {
+                let f = pts[0];
+                let l = pts[pts.len() - 1];
+                if ((f.0 - l.0).powi(2) + (f.1 - l.1).powi(2)).sqrt() < 1e-9 {
+                    pts.pop();
                 }
             }
-            if found {
-                break;
-            }
-        }
-        if !found {
-            break;
+            best = Some(pts);
         }
     }
-
-    if points.len() >= 3 {
-        let first_pt = points[0];
-        let last_pt = points[points.len() - 1];
-        let dx = first_pt.0 - last_pt.0;
-        let dy = first_pt.1 - last_pt.1;
-        if (dx * dx + dy * dy).sqrt() < 1e-6 {
-            points.pop();
-        }
-    }
-
-    Some(points)
+    best
 }
 
 #[cfg(test)]
@@ -430,6 +431,62 @@ mod tests {
         sketch.add_line(p2, p3);
         sketch.add_line(p3, p0);
         sketch
+    }
+
+    fn assert_watertight(mesh: &Mesh) {
+        use std::collections::HashMap;
+        let mut edge_count: HashMap<(u32, u32), u32> = HashMap::new();
+        for tri in mesh.indices.chunks_exact(3) {
+            for e in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                let key = if e.0 < e.1 { (e.0, e.1) } else { (e.1, e.0) };
+                *edge_count.entry(key).or_default() += 1;
+            }
+        }
+        let open = edge_count.values().filter(|&&c| c != 2).count();
+        assert_eq!(open, 0, "mesh must be watertight");
+    }
+
+    #[test]
+    fn sweep_circle_path_is_seamless_torus() {
+        // Profile: small square offset from origin; Path: standalone circle
+        // (closed). The sweep must be a seamless torus — no caps, no seam.
+        let profile = make_square_profile();
+        let mut path = Sketch::new();
+        let pc = path.add_point(5.0, 5.0);
+        path.add_circle(pc, 3.0);
+
+        let mesh = sweep_mesh(&profile, &path).expect("torus sweep should succeed");
+        assert!(mesh.vertex_count() > 0);
+        assert_watertight(&mesh);
+    }
+
+    #[test]
+    fn sweep_along_arc_path() {
+        // Path with an arc: quarter-arc between two points. Previously the
+        // arc was silently dropped (line-only extraction), producing a
+        // straight chord sweep.
+        let profile = make_square_profile();
+        let mut path = Sketch::new();
+        let p0 = path.add_point(0.0, 0.0);
+        let p1 = path.add_point(3.0, 0.0);
+        let pc = path.add_point(3.0, 3.0);
+        path.add_line(p0, p1);
+        path.add_arc(pc, 3.0, -std::f64::consts::FRAC_PI_2, 0.0);
+
+        let mesh = sweep_mesh(&profile, &path).expect("arc path sweep should succeed");
+        assert!(mesh.vertex_count() > 0);
+        assert!(!mesh.indices.is_empty());
+        // Arc tessellation must add path vertices beyond the 2 line endpoints.
+        // 4 profile points × (line pts + arc tessellation > 4) rings.
+        assert!(
+            mesh.vertex_count() > 4 * 4,
+            "arc should tessellate into path rings (got {})",
+            mesh.vertex_count()
+        );
+        let vc = mesh.vertex_count() as u32;
+        for &idx in &mesh.indices {
+            assert!(idx < vc, "index out of bounds");
+        }
     }
 
     fn make_straight_path() -> Sketch {

@@ -31,6 +31,17 @@ export function useFeatureActions(
   let extrudePreviewTimer: ReturnType<typeof setTimeout> | null = null;
   const booleanDialog = ref<BooleanTargets | null>(null);
 
+  /// Clear transient feature-creation state on document replacement
+  /// (new/open/undo/redo). Called from HomeView's reset flow — must cover
+  /// every piece of state that references the old document (§16).
+  function resetTransientFeatureState() {
+    if (extrudePreviewTimer) clearTimeout(extrudePreviewTimer);
+    extrudeRegions.value = [];
+    selectedPreviewRegions.value = null;
+    booleanDialog.value = null;
+    unifiedViewport.value?.clearPreviewMesh();
+  }
+
   // ── State helpers ─────────────────────────────────────────────────
 
   async function loadState() {
@@ -109,13 +120,16 @@ export function useFeatureActions(
   const extrudeRegions = ref<ExtrudeRegionInfo[]>([]);
 
   async function showExtrudePanel() {
-    if (activeSketchForFeature() === null) {
+    const targetId = activeSketchForFeature();
+    if (targetId === null) {
       toastStore.info("请先选择一个草图");
       return;
     }
-    // Fetch available regions for the region picker
+    // Fetch regions for the SAME sketch the extrude will target — the
+    // tree-selected sketch, not whatever happens to be backend-active
+    // (they differ after exiting sketch edit and selecting another sketch).
     try {
-      extrudeRegions.value = await getExtrudeRegions();
+      extrudeRegions.value = await getExtrudeRegions(targetId);
     } catch {
       extrudeRegions.value = [];
     }
@@ -139,6 +153,10 @@ export function useFeatureActions(
       selectedPreviewRegions.value);
     if (mesh) {
       unifiedViewport.value?.showPreviewMesh(mesh);
+    } else {
+      // Selection yields no solid (e.g. out-of-range region) — clear the
+      // old preview instead of leaving stale geometry on screen.
+      unifiedViewport.value?.clearPreviewMesh();
     }
   }
 
@@ -354,6 +372,7 @@ export function useFeatureActions(
     cancelExtrude,
     onExtrudeConfigChange,
     onExtrudeRegionChange,
+    resetTransientFeatureState,
     showExtrudePanel,
     extrudeRegions,
     selectedPreviewRegions,

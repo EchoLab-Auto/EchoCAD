@@ -81,25 +81,15 @@ fn csg(a: &Mesh, b: &Mesh, op: CsgOp) -> Mesh {
     let a_tris = mesh_to_tris(a);
     let b_tris = mesh_to_tris(b);
 
+    // Degenerate inputs with correct CSG semantics:
+    //   ∅ ∪ B = B    ∅ − B = ∅    ∅ ∩ B = ∅
+    //   A ∪ ∅ = A    A − ∅ = A    A ∩ ∅ = ∅
+    // (∅ − B previously returned B — materializing a solid from nothing.)
     if a_tris.is_empty() {
         return match op {
-            CsgOp::Union | CsgOp::Subtract => b.clone(),
-            CsgOp::Intersect => Mesh::default(),
+            CsgOp::Union => b.clone(),
+            CsgOp::Subtract | CsgOp::Intersect => Mesh::default(),
         };
-    }
-    if b_tris.is_empty() {
-        return match op {
-            CsgOp::Union | CsgOp::Subtract => a.clone(),
-            CsgOp::Intersect => Mesh::default(),
-        };
-    }
-    let a_tris = mesh_to_tris(a);
-    let b_tris = mesh_to_tris(b);
-
-    // Degenerate inputs: surface what's left, never silently produce a
-    // misleading result.
-    if a_tris.is_empty() {
-        return Mesh::default();
     }
     if b_tris.is_empty() {
         return match op {
