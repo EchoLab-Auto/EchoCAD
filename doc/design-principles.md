@@ -287,6 +287,8 @@ pub fn add_extrude_feature(...) -> Result<FeatureId, String> {
 - [ ] 是否会污染 undo 栈（非 mutation 也 snapshot 了）？
 - [ ] 选择状态是否在变更后还有效（selectedId / activeFeatureId / activePlane）？
 - [ ] THREE 对象是否被 Proxy 了（ref vs shallowRef/markRaw）？
+- [ ] **新功能是否同时有 Tauri command + Agent API 封装（原则 #14）？**
+- [ ] **Agent API 的参数是否与 command 签名一一对应（编译期类型检查）？**
 
 ---
 
@@ -303,6 +305,64 @@ pub fn add_extrude_feature(...) -> Result<FeatureId, String> {
 - 旧项目文件可以通过独立的迁移工具批量升级
 
 **反例（风险）**：在特性迁移到一半时删除旧 FeatureKind 变体，导致中间版本无法打开现有项目文件。
+
+---
+
+## 14. API 完备性（API Parity）
+
+**原则：每一个建模步骤都必须能通过编程 API 完成。UI 只是 API 的一个客户端，不是唯一的客户端。**
+
+EchoCAD 的调用链是三层：
+
+```
+┌─────────────────────────────────────────────────────┐
+│  客户端层（任意数量）                                  │
+│  ├ Vue UI（人）          — UnifiedViewport / Toolbar │
+│  ├ Agent API（AI agent） — app/src/commands/agent-api.ts │
+│  └ 测试脚本 / 自动化      — 直接调 commands/sketch.ts    │
+├─────────────────────────────────────────────────────┤
+│  IPC 层 — Tauri commands（app/src-tauri/commands.rs） │
+├─────────────────────────────────────────────────────┤
+│  领域层 — echi-core / echi-geom / echi-render / …     │
+└─────────────────────────────────────────────────────┘
+```
+
+**规则：**
+
+1. **UI 不做 API 做不了的事。** 每个交互操作（绘制、约束、特征、阵列、导出、测量……）
+   必须对应一个 Tauri command，并且必须在 `agent-api.ts` 中有对应封装。
+2. **新功能 = API + UI 一起交付。** 只有 UI 按钮没有 API 的功能视为未完成。
+3. **API 优先，UI 随后。** 设计新功能时先确定命令签名（参数、返回值、错误），
+   UI 围绕命令构建；不要把 UI 交互序列（"先点这个再点那个"）硬编码为唯一路径。
+4. **参数完备。** API 必须暴露 UI 能调的所有参数（例如拉伸的 `selected_regions`、
+   圆角/倒角的 `edges` 边列表），不允许"UI 能传但 API 传不了"的参数。
+5. **可观察性。** Agent 需要读取状态的 API 与写入 API 同等重要：
+   `get_features` / `get_sketch_entities` / `get_regen_errors` /
+   `get_mass_properties` / `capture_viewport`（视觉自检）。
+
+**覆盖检查方法（新增命令时自查）：**
+
+```
+Tauri command (snake_case)     Agent API (camelCase)        状态
+─────────────────────────────  ──────────────────────────   ────
+add_extrude_feature            extrude / extrudeTwoSides …   ✅
+add_fillet_edges_feature       filletEdges                   ✅
+get_extrude_regions            getExtrudeRegions             ✅
+export_stl / obj / gltf        exportStl / Obj / Gltf        ✅
+generate_plugin_feature        generatePluginFeature         ✅
+measure_angle                  measureAngle                  ✅
+…（完整对照表见 agent-api.ts 头部注释）
+```
+
+**为什么这重要：**
+- AI agent 是 EchoCAD 的一等用户。视觉自检循环（建模 → `captureViewport` →
+  多模态检查 → 修正）要求每个步骤都可编程触发。
+- 自动化测试可以用 Agent API 驱动完整建模流程，不需要启动 UI 交互层。
+- UI 重构（如 HomeView 拆分为 composable）不会破坏外部客户端。
+
+**反例（0.3 之前）：** Agent API 的 `line()` 直接传坐标给期望 EntityId 的
+`add_line` 命令——因为 UI 从不这样调用，这个错位直到 agent 实际使用才暴露。
+教训：API 封装必须与命令签名同步编译检查，且要有冒烟测试覆盖。
 
 ---
 

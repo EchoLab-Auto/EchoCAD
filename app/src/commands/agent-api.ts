@@ -26,26 +26,27 @@
  * const imageB64 = await cad.captureViewport();
  * ```
  *
- * ## Feature Coverage
+ * ## Feature Coverage (API Parity — design principle #14)
  *
- * | Operation     | Status | Notes |
- * |--------------|--------|-------|
- * | Sketch       | ✅     | Lines, circles, arcs, rectangles, splines, ellipses |
- * | Constraints  | ✅     | Distance, radius, parallel, perpendicular, etc. |
- * | Extrude      | ✅     | OneSide, Midplane, TwoSides, draft angle |
- * | Revolve      | ✅     | Around axis with configurable angle |
- * | Sweep        | ✅     | Profile along path |
- * | Fillet       | ✅     | All sharp edges or specific edges |
- * | Chamfer      | ✅     | All sharp edges or specific edges |
- * | Shell        | ✅     | Hollow with wall thickness |
- * | Boolean      | ✅     | Union, subtract, intersect |
- * | Pattern      | ✅     | Linear, circular, mirror |
- * | Measure      | ✅     | Distance, angle between points |
- * | Mass Props   | ✅     | Volume, surface area, centroid |
- * | STEP Export  | ✅     | OCCT-powered (requires `--features occt`) |
- * | STEP Import  | ✅     | OCCT-powered (requires `--features occt`) |
- * | Screenshot   | ✅     | Base64 PNG capture of viewport |
- * | B-Rep Toggle | ✅     | Switch between mesh/B-rep pipeline |
+ * Every modeling step available in the UI is reachable through this API.
+ *
+ * | Category     | Methods |
+ * |--------------|---------|
+ * | Sketch       | newSketch, activateSketch, offsetPlane, line, circle, arc, rectangle, spline, ellipse, point, deleteEntity, clear, sketchEntities |
+ * | Constraints  | coincident, horizontal, vertical, distanceConstraint, radius, parallel, perpendicular, tangent, concentric, fix, midpoint, symmetric, angle, removeConstraint, updateConstraint, solve, sketchConstraints |
+ * | Extrude      | extrude, extrudeTwoSides, extrudeMidplane, getExtrudeRegions, previewExtrude (all accept `selectedRegions`) |
+ * | Revolve      | revolve (with optional axis entity) |
+ * | Sweep        | sweep |
+ * | Fillet       | fillet, filletEdges |
+ * | Chamfer      | chamfer, chamferEdges |
+ * | Shell        | shell |
+ * | Boolean      | union, subtract, intersect |
+ * | Pattern      | linearPattern, circularPattern, mirror, editLinearPattern, editCircularPattern, editMirror |
+ * | Feature edit | setDepth, setSuppressed, rename, setColor, delete, setEntityProp, movePoint |
+ * | Query        | listFeatures, massProperties, measureDistance3D, measureAngle, regenErrors, allSolidMeshes |
+ * | Plugins      | listPlugins, listGenerators, runGenerator |
+ * | File         | save, saveTo, load, loadFrom, clearAll, exportStl, exportObj, exportGltf, hasRecoveryFile |
+ * | System       | undo, redo, canUndoRedo, captureViewport, setBrep, isBrepEnabled |
  */
 
 import {
@@ -54,17 +55,27 @@ import {
   addConstraint, removeConstraint, solveSketch,
   addSketchFeature, setActiveSketch, getFeatures,
   addExtrudeFeature, addRevolveFeature, addSweepFeature,
-  addFilletFeature, addChamferFeature,
+  addFilletFeature, addFilletEdgesFeature, addChamferFeature, addChamferEdgesFeature,
   addShellFeature, addBooleanFeature, addMirrorFeature,
   addLinearPattern, addCircularPattern,
-  deleteFeature, setFeatureSuppressed, updateParameter,
-  createOffsetPlane, clearSketch,
-  getMassProperties, measureDistance,
-  saveProject, loadProject as loadProjectCmd,
+  deleteFeature, setFeatureSuppressed, updateParameter, renameFeature,
+  createOffsetPlane, clearSketch, clearDocument,
+  getMassProperties, measureDistance, measureAngle,
+  saveProject, loadProject as loadProjectCmd, loadProjectFrom, saveProjectTo,
   getUseBrep, setUseBrep, captureViewport,
-  undo, redo,
+  undo, redo, canUndoRedo,
+  getSketchEntities, getSketchConstraints, getRegenErrors,
+  getExtrudeRegions, previewExtrude,
+  updateLinearPattern, updateCircularPattern, updateMirrorParams,
+  setFeatureColor, movePoint, updateEntityProp, updateConstraintValue,
+  exportStl, exportObj, exportGltf, checkRecovery,
+  listPlugins, listGenerators, generatePluginFeature,
+  getAllSolidMeshes,
 } from "./sketch";
-import type { FeatureNode } from "./sketch";
+import type {
+  FeatureNode, SketchEntity, Constraint, ExtrudeRegionInfo,
+  RenderMesh, PluginInfo, GeneratorInfo, SolidMeshEntry,
+} from "./sketch";
 
 export type { FeatureId, EntityId, ParameterId };
 
@@ -240,9 +251,20 @@ export class AgentCAD {
   // ═══════════════════════════════════════════════════════════════
 
   /** Extrude the given sketch by `depth` in OneSide mode.
-   *  addExtrudeFeature params: (sketchId, direction, dist2, draftAngleDeg, depth) */
-  async extrude(sketchId: FeatureId, depth: number, draftAngle = 0): Promise<FeatureId> {
-    return addExtrudeFeature(sketchId, "one_side", 0, draftAngle, depth) as Promise<FeatureId>;
+   *  Pass `selectedRegions` to extrude only specific loops (see getExtrudeRegions). */
+  async extrude(sketchId: FeatureId, depth: number, draftAngle = 0, selectedRegions?: number[]): Promise<FeatureId> {
+    return addExtrudeFeature(sketchId, "one_side", 0, draftAngle, depth, selectedRegions ?? null) as Promise<FeatureId>;
+  }
+
+  /** List the closed loops in the active sketch available for extrusion.
+   *  Indices returned here are what `extrude(..., selectedRegions)` expects. */
+  async getExtrudeRegions(): Promise<ExtrudeRegionInfo[]> {
+    return getExtrudeRegions();
+  }
+
+  /** Preview an extrusion without committing it to the document. */
+  async previewExtrude(sketchId: FeatureId, depth: number, selectedRegions?: number[]): Promise<RenderMesh | null> {
+    return previewExtrude(sketchId, "one_side", 0, 0, depth, selectedRegions ?? null);
   }
 
   /** Extrude in TwoSides mode with dist1 and dist2.
@@ -273,9 +295,20 @@ export class AgentCAD {
     return addFilletFeature(targetId, radius) as Promise<FeatureId>;
   }
 
+  /** Apply a fillet to specific edges. Each edge is a (vertexA, vertexB) index pair
+   *  into the target solid's mesh. An empty list falls back to all sharp edges. */
+  async filletEdges(targetId: FeatureId, radius: number, edges: [number, number][]): Promise<FeatureId> {
+    return addFilletEdgesFeature(targetId, radius, edges) as Promise<FeatureId>;
+  }
+
   /** Apply a chamfer to all sharp edges of a solid. */
   async chamfer(targetId: FeatureId, distance: number): Promise<FeatureId> {
     return addChamferFeature(targetId, distance) as Promise<FeatureId>;
+  }
+
+  /** Apply a chamfer to specific edges. See {@link filletEdges} for the edge convention. */
+  async chamferEdges(targetId: FeatureId, distance: number, edges: [number, number][]): Promise<FeatureId> {
+    return addChamferEdgesFeature(targetId, distance, edges) as Promise<FeatureId>;
   }
 
   /** Hollow a solid with given wall thickness. */
@@ -333,8 +366,54 @@ export class AgentCAD {
     await setFeatureSuppressed(featureId, suppressed);
   }
 
+  /** Rename a feature in the tree. */
+  async rename(featureId: FeatureId, name: string): Promise<void> {
+    await renameFeature(featureId, name);
+  }
+
+  /** Set (or clear, with null) a feature's display color as a hex string like "#ff8800". */
+  async setColor(featureId: FeatureId, color: string | null): Promise<void> {
+    await setFeatureColor(featureId, color);
+  }
+
+  /** Update a linear pattern's parameters in place. */
+  async editLinearPattern(featureId: FeatureId, count: number, spacing: number, dirX = 1, dirY = 0, dirZ = 0): Promise<void> {
+    await updateLinearPattern(featureId, count, spacing, dirX, dirY, dirZ);
+  }
+
+  /** Update a circular pattern's parameters in place (axis defaults to +Z through origin). */
+  async editCircularPattern(featureId: FeatureId, count: number, totalAngleDeg = 360,
+    axisX = 0, axisY = 0, axisZ = 0): Promise<void> {
+    await updateCircularPattern(featureId, count, totalAngleDeg, axisX, axisY, axisZ);
+  }
+
+  /** Update a mirror feature's plane in place. */
+  async editMirror(featureId: FeatureId,
+    planeNx: number, planeNy: number, planeNz: number,
+    planePx = 0, planePy = 0, planePz = 0): Promise<void> {
+    await updateMirrorParams(featureId, planeNx, planeNy, planeNz, planePx, planePy, planePz);
+  }
+
+  /** Move a sketch point to new coordinates (re-solves afterwards). */
+  async movePoint(pointId: EntityId, x: number, y: number): Promise<void> {
+    await movePoint(pointId, x, y);
+  }
+
+  /** Change a numeric property of a sketch entity (e.g. "radius", "x", "y"). */
+  async setEntityProp(entityId: EntityId, prop: string, value: number): Promise<boolean> {
+    return updateEntityProp(entityId, prop, value);
+  }
+
+  /** Update a driving constraint's value in place (matches the existing constraint
+   *  by kind + entity references and rewrites its value). */
+  async updateConstraint(constraint: Constraint): Promise<boolean> {
+    return updateConstraintValue(constraint);
+  }
+
   async undo(): Promise<void> { await undo(); }
   async redo(): Promise<void> { await redo(); }
+  /** Query undo/redo availability. */
+  async canUndoRedo(): Promise<[boolean, boolean]> { return canUndoRedo(); }
 
   // ═══════════════════════════════════════════════════════════════
   // Query
@@ -364,6 +443,46 @@ export class AgentCAD {
     return measureDistance(p1.x, p1.y, p1.z, p2.x, p2.y, p2.z);
   }
 
+  /** Measure the angle <p1-p2-p3 in degrees. */
+  async measureAngle(p1: Point3D, p2: Point3D, p3: Point3D): Promise<number> {
+    return measureAngle(p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, p3.x, p3.y, p3.z);
+  }
+
+  /** Read the entities of the active sketch (points/lines/circles…). */
+  async sketchEntities(): Promise<SketchEntity[]> {
+    return getSketchEntities();
+  }
+
+  /** Read the constraints of the active sketch. */
+  async sketchConstraints(): Promise<Constraint[]> {
+    return getSketchConstraints();
+  }
+
+  /** Per-feature regeneration errors (feature id + message), sorted by id. */
+  async regenErrors(): Promise<[FeatureId, string][]> {
+    return getRegenErrors();
+  }
+
+  /** All solid meshes currently produced by the feature tree. */
+  async allSolidMeshes(): Promise<SolidMeshEntry[]> {
+    return getAllSolidMeshes();
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // Plugins
+  // ═══════════════════════════════════════════════════════════════
+
+  /** List all registered plugins with their generators and tools. */
+  async listPlugins(): Promise<PluginInfo[]> { return listPlugins(); }
+
+  /** List all feature generators across all plugins. */
+  async listGenerators(): Promise<GeneratorInfo[]> { return listGenerators(); }
+
+  /** Run a plugin generator, creating a new feature in the document. */
+  async runGenerator(pluginId: string, generatorId: string, params: Record<string, number>): Promise<FeatureId> {
+    return generatePluginFeature(pluginId, generatorId, params) as Promise<FeatureId>;
+  }
+
   // ═══════════════════════════════════════════════════════════════
   // Viewport & File
   // ═══════════════════════════════════════════════════════════════
@@ -380,8 +499,24 @@ export class AgentCAD {
 
   /** Save the current project. */
   async save(): Promise<string> { return saveProject(); }
-  /** Load a project from file. */
+  /** Save the current project to a specific path. */
+  async saveTo(path: string): Promise<void> { await saveProjectTo(path); }
+  /** Load a project via file dialog. */
   async load(): Promise<void> { await loadProjectCmd(); }
+  /** Load a project from a specific path. */
+  async loadFrom(path: string): Promise<void> { await loadProjectFrom(path); }
+  /** Clear the entire document (new empty part). */
+  async clearAll(): Promise<void> { await clearDocument(); }
+
+  /** Export the merged solid as STL. Returns the file path. */
+  async exportStl(): Promise<string> { return exportStl(); }
+  /** Export the merged solid as OBJ. Returns the file path. */
+  async exportObj(): Promise<string> { return exportObj(); }
+  /** Export the merged solid as glTF 2.0. Returns the file path. */
+  async exportGltf(): Promise<string> { return exportGltf(); }
+
+  /** Check whether a crash-recovery autosave exists. */
+  async hasRecoveryFile(): Promise<boolean> { return checkRecovery(); }
 }
 
 /** Convenience: create a single global agent instance. */
