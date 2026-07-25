@@ -119,7 +119,6 @@ mod serde_entities {
     use serde::{Deserializer, Serializer};
     use std::collections::HashMap;
     use std::fmt;
-    use std::marker::PhantomData;
 
     pub fn serialize<S: Serializer>(
         map: &HashMap<EntityId, SketchEntity>,

@@ -69,9 +69,6 @@ pub struct AppState {
     pub autosave_enabled: AtomicBool,
     pub has_recovery_file: AtomicBool,
     pub use_brep: AtomicBool,
-    /// Meshes imported from external formats (STEP, etc.) that aren't
-    /// backed by native EchoCAD features. Keyed by synthetic FeatureId.
-    pub imported_meshes: Mutex<HashMap<FeatureId, echi_geom::Mesh>>,
 }
 
 impl AppState {
@@ -98,7 +95,6 @@ impl AppState {
             undo_manager: Mutex::new(UndoManager::new()),
             autosave_enabled: AtomicBool::new(true),
             has_recovery_file: AtomicBool::new(false),
-            imported_meshes: Mutex::new(HashMap::new()),
             use_brep: AtomicBool::new(false),
         }
     }

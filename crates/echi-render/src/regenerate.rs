@@ -96,7 +96,7 @@ pub fn regenerate(doc: &Document) -> RegenResult {
 pub fn regenerate_with(
     doc: &Document,
     generator: Option<&dyn SolidGenerator>,
-    brep_kernel: Option<&dyn BrepKernel>,
+    _brep_kernel: Option<&dyn BrepKernel>,
     previous: Option<&RegenResult>,
 ) -> RegenResult {
     let mut result = if let Some(prev) = previous {
@@ -127,7 +127,7 @@ pub fn regenerate_with(
         result.solids.remove(&feature.id());
         result.errors.remove(&feature.id());
 
-        if let Err(msg) = regenerate_feature(feature, doc, &mut result, generator, brep_kernel) {
+        if let Err(msg) = regenerate_feature(feature, doc, &mut result, generator, _brep_kernel) {
             result.errors.insert(feature.id(), msg);
         }
     }
@@ -140,7 +140,7 @@ fn regenerate_feature(
     doc: &Document,
     result: &mut RegenResult,
     generator: Option<&dyn SolidGenerator>,
-    brep_kernel: Option<&dyn BrepKernel>,
+    _brep_kernel: Option<&dyn BrepKernel>,
 ) -> Result<(), String> {
     // Validate dependencies first — if any input is missing, suppressed, or
     // failed, skip with a clear error. (R2: suppressed features exist in the
@@ -178,7 +178,7 @@ fn regenerate_feature(
 
             // Try B-rep path first, then fall back to mesh
             #[cfg(feature = "brep")]
-            let brep_mesh = brep_kernel
+            let brep_mesh = _brep_kernel
                 .and_then(|kernel| extrude_via_brep(kernel, sketch, height, *direction, &plane));
             #[cfg(not(feature = "brep"))]
             let brep_mesh: Option<Mesh> = None;
@@ -281,7 +281,7 @@ fn regenerate_feature(
             let mesh = occt_result.unwrap_or_else(|| {
                 #[cfg(feature = "brep")]
                 {
-                    brep_kernel.and_then(|k| k.linear_pattern_mesh_for(target, *dir_x, *dir_y, *dir_z, *count, *spacing).ok())
+                    _brep_kernel.and_then(|k| k.linear_pattern_mesh_for(target, *dir_x, *dir_y, *dir_z, *count, *spacing).ok())
                         .unwrap_or_else(|| linear_pattern(target, *dir_x, *dir_y, *dir_z, *count, *spacing))
                 }
                 #[cfg(not(feature = "brep"))]
@@ -314,7 +314,7 @@ fn regenerate_feature(
             let mesh = occt_result.unwrap_or_else(|| {
                 #[cfg(feature = "brep")]
                 {
-                    brep_kernel.and_then(|k| k.circular_pattern_mesh_for(target, *axis_x, *axis_y, *axis_z, *axis_dx, *axis_dy, *axis_dz, *count, *total_angle_deg).ok())
+                    _brep_kernel.and_then(|k| k.circular_pattern_mesh_for(target, *axis_x, *axis_y, *axis_z, *axis_dx, *axis_dy, *axis_dz, *count, *total_angle_deg).ok())
                         .unwrap_or_else(|| circular_pattern(target, *axis_x, *axis_y, *axis_z, *axis_dx, *axis_dy, *axis_dz, *count, *total_angle_deg))
                 }
                 #[cfg(not(feature = "brep"))]
@@ -341,7 +341,7 @@ fn regenerate_feature(
             let mesh = occt_result.unwrap_or_else(|| {
                 #[cfg(feature = "brep")]
                 {
-                    brep_kernel.and_then(|k| k.mirror_mesh_for(target, *plane_nx, *plane_ny, *plane_nz, *plane_px, *plane_py, *plane_pz).ok())
+                    _brep_kernel.and_then(|k| k.mirror_mesh_for(target, *plane_nx, *plane_ny, *plane_nz, *plane_px, *plane_py, *plane_pz).ok())
                         .unwrap_or_else(|| mirror_across_plane(target, *plane_nx, *plane_ny, *plane_nz, *plane_px, *plane_py, *plane_pz))
                 }
                 #[cfg(not(feature = "brep"))]
@@ -364,7 +364,7 @@ fn regenerate_feature(
             let occt_result: Option<Mesh> = None;
 
             #[cfg(feature = "brep")]
-            let brep_result = brep_kernel.and_then(|k| k.sweep_mesh(profile, path).ok());
+            let brep_result = _brep_kernel.and_then(|k| k.sweep_mesh(profile, path).ok());
             #[cfg(not(feature = "brep"))]
             let brep_result: Option<Mesh> = None;
 
@@ -394,7 +394,7 @@ fn regenerate_feature(
             let occt_result: Option<Mesh> = None;
 
             #[cfg(feature = "brep")]
-            let brep_result = brep_kernel.and_then(|k| k.shell_mesh(target, t).ok());
+            let brep_result = _brep_kernel.and_then(|k| k.shell_mesh(target, t).ok());
             #[cfg(not(feature = "brep"))]
             let brep_result: Option<Mesh> = None;
 
@@ -420,11 +420,11 @@ fn regenerate_feature(
             #[cfg(feature = "brep")]
             let brep_result = match op {
                 echi_core::feature::BoolOp::Union =>
-                    brep_kernel.and_then(|k| k.boolean_union(a, b).ok()),
+                    _brep_kernel.and_then(|k| k.boolean_union(a, b).ok()),
                 echi_core::feature::BoolOp::Subtract =>
-                    brep_kernel.and_then(|k| k.boolean_subtract(a, b).ok()),
+                    _brep_kernel.and_then(|k| k.boolean_subtract(a, b).ok()),
                 echi_core::feature::BoolOp::Intersect =>
-                    brep_kernel.and_then(|k| k.boolean_intersect(a, b).ok()),
+                    _brep_kernel.and_then(|k| k.boolean_intersect(a, b).ok()),
             };
             #[cfg(not(feature = "brep"))]
             let brep_result: Option<Mesh> = None;
@@ -469,7 +469,7 @@ fn regenerate_feature(
             let occt_result: Option<Mesh> = None;
 
             #[cfg(feature = "brep")]
-            let brep_result = brep_kernel.and_then(|kernel| {
+            let brep_result = _brep_kernel.and_then(|kernel| {
                 revolve_via_brep(kernel, sketch, angle_rad, axis_start, axis_end)
             });
             #[cfg(not(feature = "brep"))]
