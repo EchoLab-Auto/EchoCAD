@@ -281,6 +281,8 @@ const sketchTools = [
   { value: "rectangle" as const, label: "矩形", shortcut: "R" },
   { value: "spline" as const, label: "样条", shortcut: "B" },
   { value: "ellipse" as const, label: "椭圆", shortcut: "I" },
+  { value: "trim" as const, label: "裁剪", shortcut: "T" },
+  { value: "extend" as const, label: "延伸", shortcut: "X" },
 ];
 
 const constraintItems: ConstraintItem[] = [

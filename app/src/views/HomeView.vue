@@ -560,6 +560,8 @@ async function onKeyDown(e: KeyboardEvent) {
     case "r": case "R": sketchStore.setTool("rectangle"); break;
     case "b": case "B": sketchStore.setTool("spline"); break;
     case "i": case "I": sketchStore.setTool("ellipse"); break;
+    case "t": case "T": sketchStore.setTool("trim"); break;
+    case "x": case "X": sketchStore.setTool("extend"); break;
     case "s": case "S": if (!e.ctrlKey) solve(); break;
     case "h": case "H": addHorizontal(); break;
     case "v": case "V": addVertical(); break;

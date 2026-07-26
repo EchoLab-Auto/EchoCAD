@@ -408,8 +408,13 @@ export function useSketchActions(
     }
     const f = sketchStore.features.find(x => x.id === id);
     // Sync the working plane for display (face view) even when not editing.
-    if (f?.plane && f.plane !== "offset") {
+    if (f?.plane) {
       sketchStore.activePlane = f.plane;
+      // Also store offset plane metadata for planeFrame resolution.
+      if (f.plane === "offset") {
+        sketchStore.activePlaneBase = f.plane_base ?? null;
+        sketchStore.activePlaneDistance = f.plane_distance ?? null;
+      }
     }
   }
 
@@ -426,8 +431,12 @@ export function useSketchActions(
     sketchStore.setEditingSketch(id);
     sketchStore.setTool("select");
 
-    if (f.plane && f.plane !== "offset") {
+    if (f.plane) {
       sketchStore.activePlane = f.plane;
+      if (f.plane === "offset") {
+        sketchStore.activePlaneBase = f.plane_base ?? null;
+        sketchStore.activePlaneDistance = f.plane_distance ?? null;
+      }
     }
     if (sketchStore.showExtrudePanel) {
       sketchStore.showExtrudePanel = false;
@@ -488,11 +497,20 @@ export function useSketchActions(
       await unifiedViewport.value?.refreshViewport();
       toastStore.success(`已删除 "${feature.name}"`);
     } catch (err: any) {
-      // Parse dependent names from the error message
+      // Parse dependent names from the structured error (原则 §7).
       const msg = String(err);
-      const dependentNames = msg.startsWith("dependents:")
-        ? msg.slice("dependents:".length).split(",").filter(Boolean)
-        : [];
+      let dependentNames: string[] = [];
+      try {
+        const parsed = JSON.parse(msg);
+        if (parsed.kind === "dependents" && Array.isArray(parsed.names)) {
+          dependentNames = parsed.names;
+        }
+      } catch {
+        // Fallback to legacy string format for backward compatibility.
+        if (msg.startsWith("dependents:")) {
+          dependentNames = msg.slice("dependents:".length).split(",").filter(Boolean);
+        }
+      }
       cascadeDialog.value = { id, name: feature.name, dependents: dependentNames };
     }
   }

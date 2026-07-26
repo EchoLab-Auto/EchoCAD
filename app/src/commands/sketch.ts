@@ -100,6 +100,10 @@ export interface FeatureNode {
   errors: string | null;
   /** For sketches: the plane the sketch lives on. */
   plane: "xy" | "yz" | "zx" | "offset" | null;
+  /** When plane is "offset": the base plane tag ("xy" | "yz" | "zx"). */
+  plane_base?: string | null;
+  /** When plane is "offset": the signed distance along the base plane's normal. */
+  plane_distance?: number | null;
   /** Optional per-feature color as a hex string (e.g. "#ff8800").
    *  `null` / absent means the renderer should use the default palette. */
   color?: string | null;
@@ -388,6 +392,21 @@ export async function deleteEntityNoSnapshot(id: EntityId): Promise<boolean> {
   return invoke("delete_entity_no_snapshot", { id });
 }
 
+/** Trim an entity at the nearest intersection with another entity.
+ *  The clicked portion of the entity is kept. */
+export async function trimEntity(
+  entityId: EntityId, clickX: number, clickY: number,
+): Promise<boolean> {
+  return invoke("trim_entity", { entityId, clickX, clickY });
+}
+
+/** Extend an entity along its natural direction until it hits a boundary. */
+export async function extendEntity(
+  entityId: EntityId, clickX: number, clickY: number,
+): Promise<boolean> {
+  return invoke("extend_entity", { entityId, clickX, clickY });
+}
+
 export async function movePoint(
   id: EntityId,
   x: number,
@@ -475,6 +494,14 @@ export async function exportObj(): Promise<string> {
 
 export async function exportGltf(): Promise<string> {
   return invoke("export_gltf_cmd");
+}
+
+export async function exportStep(): Promise<string> {
+  return invoke("export_step");
+}
+
+export async function importStep(): Promise<string> {
+  return invoke("import_step");
 }
 
 export async function checkRecovery(): Promise<boolean> {

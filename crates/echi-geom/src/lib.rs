@@ -4,9 +4,11 @@ pub mod boolean;
 pub mod extrude;
 pub mod fillet;
 pub mod mass_props;
+pub mod param_curve;
 pub mod pattern;
 pub mod revolve;
 pub mod shell;
+pub mod sketch_geom;
 pub mod solver;
 pub mod sweep;
 

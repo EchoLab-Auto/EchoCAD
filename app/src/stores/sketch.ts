@@ -11,7 +11,7 @@ import type {
 } from "@/commands/sketch";
 import { setFeatureColor as setFeatureColorCmd, setUseBrep, getUseBrep } from "@/commands/sketch";
 
-export type Tool = "select" | "line" | "circle" | "arc" | "rectangle" | "spline" | "ellipse" | "plugin";
+export type Tool = "select" | "line" | "circle" | "arc" | "rectangle" | "spline" | "ellipse" | "plugin" | "trim" | "extend";
 
 export interface ExtrudeConfig {
   direction: string;
@@ -138,6 +138,10 @@ export const useSketchStore = defineStore("sketch", () => {
 
   // Viewport state
   const activePlane = ref<string>("xy");
+  /** When activePlane is "offset": the base plane tag. */
+  const activePlaneBase = ref<string | null>(null);
+  /** When activePlane is "offset": signed distance along the base normal. */
+  const activePlaneDistance = ref<number | null>(null);
   const showExtrudePanel = ref(false);
   const showDimensions = ref(true);
   const extrudeConfig = ref<ExtrudeConfig>({
@@ -283,6 +287,8 @@ export const useSketchStore = defineStore("sketch", () => {
     pendingFilletChamferTarget.value = null;
     measureMode.value = false;
     measurePoints.value = [];
+    activePlaneBase.value = null;
+    activePlaneDistance.value = null;
   }
 
   return {
@@ -302,6 +308,8 @@ export const useSketchStore = defineStore("sketch", () => {
     generators,
     activePluginTool,
     activePlane,
+    activePlaneBase,
+    activePlaneDistance,
     showExtrudePanel,
     showDimensions,
     extrudeConfig,

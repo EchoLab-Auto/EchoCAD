@@ -45,7 +45,7 @@
  * | Feature edit | setDepth, setSuppressed, rename, setColor, delete, setEntityProp, movePoint |
  * | Query        | listFeatures, massProperties, measureDistance3D, measureAngle, regenErrors, allSolidMeshes |
  * | Plugins      | listPlugins, listGenerators, runGenerator |
- * | File         | save, saveTo, load, loadFrom, clearAll, exportStl, exportObj, exportGltf, hasRecoveryFile |
+ * | File         | save, saveTo, load, loadFrom, clearAll, exportStl, exportObj, exportGltf, exportStep, importStep, hasRecoveryFile |
  * | System       | undo, redo, canUndoRedo, captureViewport, setBrep, isBrepEnabled |
  */
 
@@ -68,7 +68,7 @@ import {
   getExtrudeRegions, previewExtrude,
   updateLinearPattern, updateCircularPattern, updateMirrorParams,
   setFeatureColor, movePoint, updateEntityProp, updateConstraintValue,
-  exportStl, exportObj, exportGltf, checkRecovery,
+  exportStl, exportObj, exportGltf, exportStep, importStep, checkRecovery,
   listPlugins, listGenerators, generatePluginFeature,
   getAllSolidMeshes,
 } from "./sketch";
@@ -365,13 +365,15 @@ export class AgentCAD {
   // Edit
   // ═══════════════════════════════════════════════════════════════
 
-  /** Change an extrude depth parameter. */
+  /** Change a feature's primary numeric parameter (depth/radius/angle/thickness/…).
+   *  Uses the first parameter belonging to the feature, which is always the
+   *  primary one per the parameter naming convention (原则 §10). */
   async setDepth(featureId: FeatureId, depth: number): Promise<void> {
     const features = await getFeatures();
     const f = features.find(x => x.id === featureId);
     if (!f) throw new Error(`Feature ${featureId} not found`);
-    const param = f.parameters.find(p => p.name !== "angle" && p.name !== "radius" && p.name !== "thickness");
-    if (param) await updateParameter(param.id, depth);
+    if (f.parameters.length === 0) throw new Error(`Feature ${featureId} has no parameters`);
+    await updateParameter(f.parameters[0].id, depth);
   }
 
   /** Suppress or unsuppress a feature. */
@@ -527,6 +529,11 @@ export class AgentCAD {
   async exportObj(): Promise<string> { return exportObj(); }
   /** Export the merged solid as glTF 2.0. Returns the file path. */
   async exportGltf(): Promise<string> { return exportGltf(); }
+
+  /** Export the model as STEP (OCCT-powered). Requires the `occt` feature. */
+  async exportStep(): Promise<string> { return exportStep(); }
+  /** Import a STEP file (OCCT-powered). Returns a FeatureId that wraps the imported geometry. */
+  async importStep(): Promise<string> { return importStep(); }
 
   /** Check whether a crash-recovery autosave exists. */
   async hasRecoveryFile(): Promise<boolean> { return checkRecovery(); }

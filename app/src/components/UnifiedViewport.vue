@@ -70,6 +70,7 @@ import {
   getSketchEntities, getSketchConstraints,
   addPoint, addLine, addCircle, addArc, addSpline, addEllipse,
   addConstraint, solveSketch, movePoint, movePointNoSnapshot, deleteEntityNoSnapshot,
+  trimEntity, extendEntity,
   type RenderMesh, type EntityId,
 } from "@/commands/sketch";
 import { useSketchStore } from "@/stores/sketch";
@@ -88,6 +89,10 @@ import {
   SNAP_PX, SNAP_LABELS, SNAP_PRIORITY, toolLabel,
   type SnapResult,
 } from "@/composables/useSketchInteraction";
+import {
+  nearestPointOnSegment, nearestPointOnCircle, nearestPointOnArc,
+  tangentPointsFromPoint, perpendicularFoot,
+} from "@/composables/useSketchGeom";
 
 const emit = defineEmits<{
   (e: "faceSelected", featureId: number, faceIndex: number): void;
@@ -438,11 +443,11 @@ function getActivePlane() {
   if (isSketchMode.value) {
     const sketchId = store.editingSketchId ?? store.activeFeatureId;
     const f = sketchId ? store.features.find(x => x.id === sketchId) : null;
-    if (f?.plane && f.plane !== "offset") {
-      return planeFrame(f.plane);
+    if (f?.plane) {
+      return planeFrame(f.plane, f.plane_base, f.plane_distance);
     }
   }
-  return planeFrame(getActivePlaneName());
+  return planeFrame(getActivePlaneName(), store.activePlaneBase, store.activePlaneDistance);
 }
 
 function getActivePlaneName(): string {
@@ -451,7 +456,7 @@ function getActivePlaneName(): string {
     // may point to a different feature selected in the tree.
     const sketchId = store.editingSketchId ?? store.activeFeatureId;
     const f = sketchId ? store.features.find(x => x.id === sketchId) : null;
-    if (f?.plane && f.plane !== "offset") {
+    if (f?.plane) {
       return f.plane;
     }
   }
@@ -712,12 +717,22 @@ async function refreshViewport() {
     if (!ctx.value) return;
     clearSolids();
 
-    // Build a feature-id -> hex-color map from the store's featureColors
-    // and from FeatureNode.color (for future backend persistence).
-    const colorMap: Record<number, string> = { ...store.featureColors };
+    // Build a feature-id -> hex-color map. Backend-persisted colors
+    // (FeatureNode.color) take priority; frontend overrides (featureColors)
+    // fill in for colors set in the current session that haven't been
+    // persisted yet. When both exist, backend wins — the persisted color
+    // is the single source of truth (原则 §1).
+    const colorMap: Record<number, string> = {};
     for (const f of store.features) {
-      if (f.color && !colorMap[f.id]) {
+      if (f.color) {
         colorMap[f.id] = f.color;
+      }
+    }
+    // Frontend overrides only fill gaps — they don't shadow backend values.
+    for (const [idStr, hex] of Object.entries(store.featureColors)) {
+      const id = Number(idStr);
+      if (!colorMap[id]) {
+        colorMap[id] = hex;
       }
     }
 
@@ -850,6 +865,64 @@ function computeSnap(sketch: { x: number; y: number }, sx: number, sy: number): 
       }
     }
   }
+  // ── Snap to nearest point on line (on_line) ──
+  for (const entity of store.entities) {
+    if (entity.type === "Line") {
+      const np = nearestPointOnSegment(sketch.x, sketch.y, entity.x1, entity.y1, entity.x2, entity.y2);
+      const s = toScreen(np.x, np.y);
+      if (Math.hypot(s.x - sx, s.y - sy) < SNAP_PX * 0.6) {
+        candidates.push({ type: "on_line", world: { x: np.x, y: np.y }, screen: s });
+      }
+    }
+  }
+  // ── Snap to nearest point on circle/arc circumference (on_circle) ──
+  for (const entity of store.entities) {
+    if (entity.type === "Circle") {
+      const np = nearestPointOnCircle(sketch.x, sketch.y, entity.cx, entity.cy, entity.radius);
+      const s = toScreen(np.x, np.y);
+      if (Math.hypot(s.x - sx, s.y - sy) < SNAP_PX * 0.5) {
+        candidates.push({ type: "on_circle", world: { x: np.x, y: np.y }, screen: s });
+      }
+    } else if (entity.type === "Arc") {
+      const np = nearestPointOnArc(sketch.x, sketch.y, entity.cx, entity.cy, entity.radius, entity.start_angle, entity.end_angle);
+      const s = toScreen(np.x, np.y);
+      if (Math.hypot(s.x - sx, s.y - sy) < SNAP_PX * 0.5) {
+        candidates.push({ type: "on_circle", world: { x: np.x, y: np.y }, screen: s });
+      }
+    }
+  }
+  // ── Tangent snap (only when drawing a line from a known start point) ──
+  if (store.activeTool === "line" && (state.lineStartId.value !== null || state.lineStartPos.value !== null)) {
+    const start = getLineStartCoords();
+    if (start) {
+      for (const entity of store.entities) {
+        if (entity.type === "Circle") {
+          const tps = tangentPointsFromPoint(start.x, start.y, entity.cx, entity.cy, entity.radius);
+          for (const tp of tps) {
+            const s = toScreen(tp.x, tp.y);
+            if (Math.hypot(s.x - sx, s.y - sy) < SNAP_PX) {
+              candidates.push({ type: "tangent", world: { x: tp.x, y: tp.y }, screen: s });
+            }
+          }
+        }
+      }
+    }
+  }
+  // ── Perpendicular snap (only when drawing a line from a known start point) ──
+  if (store.activeTool === "line" && (state.lineStartId.value !== null || state.lineStartPos.value !== null)) {
+    const start = getLineStartCoords();
+    if (start) {
+      for (const entity of store.entities) {
+        if (entity.type === "Line") {
+          const foot = perpendicularFoot(start.x, start.y, entity.x1, entity.y1, entity.x2, entity.y2);
+          const s = toScreen(foot.x, foot.y);
+          if (Math.hypot(s.x - sx, s.y - sy) < SNAP_PX * 0.6) {
+            candidates.push({ type: "perpendicular", world: { x: foot.x, y: foot.y }, screen: s });
+          }
+        }
+      }
+    }
+  }
   // Grid snap
   const gx = Math.round(sketch.x);
   const gy = Math.round(sketch.y);
@@ -966,12 +1039,13 @@ async function handleDrawingMouseDown(sketch: { x: number; y: number }) {
         // position to be committed on the second click.
         if (hit) {
           state.lineStartId.value = hit;
+          state.lineChainOriginId.value = hit;
         } else {
           state.lineStartPos.value = { x: world.x, y: world.y };
+          state.lineChainOriginPos.value = { x: world.x, y: world.y };
         }
       } else {
-        // Second click: commit the start point (if deferred), then the end
-        // point, then the line.
+        // Second+ click: commit deferred start (if any), create line.
         try {
           let startId = state.lineStartId.value;
           if (startId === null && state.lineStartPos.value) {
@@ -979,10 +1053,25 @@ async function handleDrawingMouseDown(sketch: { x: number; y: number }) {
             if (id === null) { resetDrawingState(state); return; }
             startId = id;
             state.lineStartId.value = id;
+            // The deferred position's newly-created point is the chain origin
+            state.lineChainOriginId.value = id;
+            state.lineChainOriginPos.value = null;
           }
           const start = getLineStartCoords();
           if (!start || startId === null) { resetDrawingState(state); return; }
-          const endWorld = snapAngle(start, world, true);
+          // Check for loop closure: clicking back on the chain origin.
+          if (hit !== null && hit === state.lineChainOriginId.value) {
+            // Close the loop and auto-terminate the chain.
+            await addLine(startId, hit);
+            pendingPointIds.value = [];
+            resetDrawingState(state);
+            clearSketchPreviews();
+            await refreshSketch();
+            break;
+          }
+          // Skip angular snap when clicking on an existing point (hit) —
+          // the user is snapping to existing geometry.
+          const endWorld = hit ? world : snapAngle(start, world, true);
           let endId = hit;
           if (!endId) {
             const newId = await addTrackedPoint(endWorld.x, endWorld.y);
@@ -1199,6 +1288,42 @@ async function handleDrawingMouseDown(sketch: { x: number; y: number }) {
       }
       break;
     }
+    case "trim": {
+      const closestId = findClosestEntity(store.entities, world.x, world.y, 0.5);
+      if (closestId === null) {
+        toast.info("请点击要裁剪的实体");
+        return;
+      }
+      try {
+        const ok = await trimEntity(closestId, world.x, world.y);
+        if (!ok) {
+          toast.info("未找到切割交点，无法裁剪");
+        } else {
+          await refreshSketch();
+        }
+      } catch (err) {
+        toast.error("裁剪失败: " + String(err));
+      }
+      break;
+    }
+    case "extend": {
+      const closestId = findClosestEntity(store.entities, world.x, world.y, 0.5);
+      if (closestId === null) {
+        toast.info("请点击要延伸的实体");
+        return;
+      }
+      try {
+        const ok = await extendEntity(closestId, world.x, world.y);
+        if (!ok) {
+          toast.info("未找到边界交点，无法延伸");
+        } else {
+          await refreshSketch();
+        }
+      } catch (err) {
+        toast.error("延伸失败: " + String(err));
+      }
+      break;
+    }
   }
 }
 
@@ -1271,7 +1396,12 @@ async function onMouseMove(e: MouseEvent) {
   if (store.activeTool === "line" && (state.lineStartId.value !== null || state.lineStartPos.value !== null)) {
     const start = getLineStartCoords();
     if (start) {
-      const snapped = snapAngle(start, previewWorld, true);
+      // Skip angular snap when cursor is on an existing point (endpoint snap)
+      // or on a line/circle — angular snap would pull the preview away from
+      // the intended closure point, making it seem impossible to close a loop.
+      const snapType = activeSnap.value?.type;
+      const useAngleSnap = !snapType || snapType === "grid";
+      const snapped = snapAngle(start, previewWorld, useAngleSnap);
       drawLinePreview(start, snapped);
     }
   }

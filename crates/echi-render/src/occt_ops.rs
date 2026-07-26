@@ -257,22 +257,35 @@ pub fn occt_extrude_loops(
         ExtrudeDirection::Midplane => (height/2.0, height/2.0),
         ExtrudeDirection::TwoSides { dist1, dist2 } => (dist1.max(dist2), 0.0),
     };
-    let outer_pts: Vec<DVec3> = loops[0].iter().map(|p| DVec3::new(p.x, p.y, 0.0)).collect();
+    // Sort loops by area (largest first) to reliably identify the outer loop.
+    // extract_loops returns loops in EntityId order, which is NOT guaranteed
+    // to be outer-first. Without sorting, concentric circles drawn inner-first
+    // would produce a thin inner cylinder instead of a hollow tube.
+    use echi_geom::extrude::polygon_area;
+    let mut sorted: Vec<&Vec<echi_geom::extrude::Point2D>> = loops.iter().collect();
+    sorted.sort_by(|a, b| {
+        let area_b = polygon_area(b).abs();
+        let area_a = polygon_area(a).abs();
+        area_b.partial_cmp(&area_a).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let outer_pts: Vec<DVec3> = sorted[0].iter().map(|p| DVec3::new(p.x, p.y, 0.0)).collect();
     let outer_edges = cadrum::Edge::polygon(&outer_pts).ok()?;
     let mut solid = OcctSolid::extrude(&outer_edges, DVec3::new(0.0, 0.0, h1)).ok()?;
-    for hole_pts in loops.iter().skip(1) {
+    for hole_pts in sorted.iter().skip(1) {
         let pts: Vec<DVec3> = hole_pts.iter().map(|p| DVec3::new(p.x, p.y, -1.0)).collect();
-        if let Ok(edges) = cadrum::Edge::polygon(&pts) {
-            if let Ok(hole) = OcctSolid::extrude(&edges, DVec3::new(0.0, 0.0, h1+2.0)) {
-                if let Ok(result) = (cadrum::Boolean::from(&solid) - &hole).build() { solid = result; }
-            }
-        }
+        // Boolean failure must NOT be silently skipped — it means the hole
+        // wasn't punched, producing a solid cylinder where a tube was expected.
+        // Return None to fall through to the mesh extrusion path.
+        let edges = cadrum::Edge::polygon(&pts).ok()?;
+        let hole = OcctSolid::extrude(&edges, DVec3::new(0.0, 0.0, h1+2.0)).ok()?;
+        solid = (cadrum::Boolean::from(&solid) - &hole).build().ok()?;
     }
     let occt_mesh = OcctSolid::mesh(std::iter::once(&solid),
         cadrum::Tessellation { deflection_linear: 0.1, relative_linear: false, ..Default::default() }).ok()?;
     let mut mesh = cadrum_mesh_to_echi(&occt_mesh);
     if h2_offset > 0.0 {
-        let pts: Vec<ProfilePoint> = loops[0].iter().map(|p| ProfilePoint::new(p.x, p.y)).collect();
+        let pts: Vec<ProfilePoint> = sorted[0].iter().map(|p| ProfilePoint::new(p.x, p.y)).collect();
         if let Ok(upper) = crate::MockBrepKernel.extrude_mesh(&pts, h1) {
             let mut combined = Mesh::default();
             copy_mesh(&mesh, &mut combined, 0.0);

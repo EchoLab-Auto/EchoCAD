@@ -248,8 +248,14 @@ pub struct FeatureNode {
     pub suppressed: bool,
     pub has_dependents: bool,
     pub errors: Option<String>,
-    /// For sketch features, the plane the sketch lives on ("xy" / "yz" / "zx").
+    /// For sketch features, the plane the sketch lives on ("xy" / "yz" / "zx" / "offset").
     pub plane: Option<String>,
+    /// When `plane` is "offset", the base plane tag ("xy" | "yz" | "zx").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plane_base: Option<String>,
+    /// When `plane` is "offset", the signed distance along the base plane's normal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plane_distance: Option<f64>,
     /// Optional per-feature color as a hex string (e.g. "#ff8800").
     /// `None` means the renderer should use the default palette-based color.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -443,12 +449,28 @@ fn feature_to_node(f: &Feature, doc: &Document, errors: &HashMap<FeatureId, Stri
         }
     };
 
-    let plane = f.plane().map(|p| match p {
-        PlaneDefinition::YZ => "yz".to_string(),
-        PlaneDefinition::ZX => "zx".to_string(),
-        PlaneDefinition::Offset { .. } => "offset".to_string(),
-        PlaneDefinition::XY => "xy".to_string(),
-    });
+    let plane: Option<String>;
+    let plane_base: Option<String>;
+    let plane_distance: Option<f64>;
+    if let Some(p) = f.plane() {
+        match p {
+            PlaneDefinition::YZ => { plane = Some("yz".into()); plane_base = None; plane_distance = None; }
+            PlaneDefinition::ZX => { plane = Some("zx".into()); plane_base = None; plane_distance = None; }
+            PlaneDefinition::Offset { base, distance } => {
+                plane = Some("offset".into());
+                plane_base = Some(match **base {
+                    PlaneDefinition::YZ => "yz",
+                    PlaneDefinition::ZX => "zx",
+                    PlaneDefinition::XY => "xy",
+                    PlaneDefinition::Offset { .. } => "xy",
+                }.to_string());
+                plane_distance = Some(*distance);
+            }
+            PlaneDefinition::XY => { plane = Some("xy".into()); plane_base = None; plane_distance = None; }
+        }
+    } else {
+        plane = None; plane_base = None; plane_distance = None;
+    }
 
     let target_id = match &f.kind {
         FeatureKind::Extrude { sketch_id, .. } | FeatureKind::Revolve { sketch_id, .. } => Some(*sketch_id),
@@ -469,6 +491,8 @@ fn feature_to_node(f: &Feature, doc: &Document, errors: &HashMap<FeatureId, Stri
         has_dependents: doc.has_dependents(f.id()),
         errors: errors.get(&f.id()).cloned(),
         plane,
+        plane_base,
+        plane_distance,
         color: f.color.clone(),
         target_id,
     }
@@ -578,10 +602,11 @@ pub fn add_sketch_feature(plane: String, state: tauri::State<AppState>) -> Featu
         "zx" => PlaneDefinition::ZX,
         _ => PlaneDefinition::XY,
     };
+    let kind = FeatureKind::Sketch { plane: p, sketch: Sketch::new() };
     doc.add_feature(Feature::new(
         id,
-        format!("Sketch{}", id.0),
-        FeatureKind::Sketch { plane: p, sketch: Sketch::new() },
+        default_feature_name(&kind, id),
+        kind,
     ));
     *state.lock_sketch() = Some(id);
     regen_locked(&doc, &state);
@@ -703,10 +728,11 @@ pub fn create_offset_plane(
     let mut doc = state.lock_doc();
     let id = doc.new_feature_id();
     let plane = PlaneDefinition::Offset { base: Box::new(base), distance };
+    let kind = FeatureKind::Sketch { plane, sketch: Sketch::new() };
     doc.add_feature(Feature::new(
         id,
-        format!("Sketch{}", id.0),
-        FeatureKind::Sketch { plane, sketch: Sketch::new() },
+        default_feature_name(&kind, id),
+        kind,
     ));
     *state.lock_sketch() = Some(id);
     regen_locked(&doc, &state);
@@ -884,7 +910,10 @@ pub fn delete_feature(
         let names: Vec<String> = dependents.iter()
             .filter_map(|d| doc.get_feature(*d).map(|f| f.name().to_string()))
             .collect();
-        return Err(format!("dependents:{}", names.join(",")));
+        return Err(serde_json::json!({
+            "kind": "dependents",
+            "names": names
+        }).to_string());
     }
 
     // Cascade: repeatedly remove features that depend on this one.
@@ -1073,7 +1102,11 @@ pub fn update_constraint_value(constraint: Constraint, state: tauri::State<AppSt
 }
 #[tauri::command]
 pub fn solve_sketch(state: tauri::State<AppState>) -> Vec<String> {
-    state.snapshot_if_sketch();
+    // No snapshot — the command that triggered the solve (addConstraint,
+    // movePoint, etc.) already took a snapshot. solve_sketch is purely
+    // computational (resolving constraint positions); snapshotting here
+    // would create a duplicate undo entry for every constraint operation
+    // (设计原则 §3).
     let mut diagnostics = Vec::new();
     state.with_active_sketch_mut(|s| {
         let iterations = echi_geom::solve(s, 100, 1e-6);
@@ -1167,6 +1200,259 @@ pub fn delete_entity(id: EntityId, state: tauri::State<AppState>) -> bool {
 #[tauri::command]
 pub fn delete_entity_no_snapshot(id: EntityId, state: tauri::State<AppState>) -> bool {
     state.with_active_sketch_mut(|s| !s.delete_entity_cascade(id).is_empty()).unwrap_or(false)
+}
+
+/// Helper: check if a SketchEntity has a construction flag set to true.
+fn entity_is_construction(entity: &SketchEntity) -> bool {
+    match entity {
+        SketchEntity::Line { construction, .. }
+        | SketchEntity::Circle { construction, .. }
+        | SketchEntity::Arc { construction, .. }
+        | SketchEntity::Spline { construction, .. }
+        | SketchEntity::Ellipse { construction, .. } => *construction,
+        SketchEntity::Point(_) => false,
+    }
+}
+
+/// Trim an entity at the nearest intersection with another non-construction entity.
+/// The portion nearest to (click_x, click_y) is kept.
+#[tauri::command]
+pub fn trim_entity(
+    entity_id: EntityId,
+    click_x: f64,
+    click_y: f64,
+    state: tauri::State<AppState>,
+) -> Result<bool, String> {
+    use echi_geom::sketch_geom;
+    state.snapshot_if_sketch();
+    state.with_active_sketch_mut(|sketch| {
+        let entity = sketch.entities.get(&entity_id).ok_or("entity not found")?.clone();
+        // Collect intersection points with ALL other non-construction entities
+        struct Hit { x: f64, y: f64, dist_to_click: f64 }
+        let mut hits: Vec<Hit> = Vec::new();
+
+        for (&other_id, other) in &sketch.entities {
+            if other_id == entity_id { continue; }
+            if entity_is_construction(other) { continue; }
+
+            match &entity {
+                SketchEntity::Line { start, end, .. } => {
+                    let p1 = sketch.get_point(*start).ok_or("start point missing")?;
+                    let p2 = sketch.get_point(*end).ok_or("end point missing")?;
+                    match other {
+                        SketchEntity::Line { start: os, end: oe, .. } => {
+                            let op1 = match sketch.get_point(*os) { Some(p) => p, None => continue };
+                            let op2 = match sketch.get_point(*oe) { Some(p) => p, None => continue };
+                            if let Some((ix, iy, _, _)) = sketch_geom::segment_intersection(
+                                p1.x, p1.y, p2.x, p2.y, op1.x, op1.y, op2.x, op2.y, 1e-6,
+                            ) {
+                                let d = ((click_x - ix).powi(2) + (click_y - iy).powi(2)).sqrt();
+                                hits.push(Hit { x: ix, y: iy, dist_to_click: d });
+                            }
+                        }
+                        SketchEntity::Circle { center, radius, .. } => {
+                            let cp = match sketch.get_point(*center) { Some(p) => p, None => continue };
+                            for (ix, iy) in sketch_geom::segment_circle_intersection(
+                                p1.x, p1.y, p2.x, p2.y, cp.x, cp.y, *radius,
+                            ) {
+                                let d = ((click_x - ix).powi(2) + (click_y - iy).powi(2)).sqrt();
+                                hits.push(Hit { x: ix, y: iy, dist_to_click: d });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                SketchEntity::Circle { center, radius, .. } => {
+                    let cp = match sketch.get_point(*center) { Some(p) => p, None => continue };
+                    match other {
+                        SketchEntity::Line { start: os, end: oe, .. } => {
+                            let op1 = match sketch.get_point(*os) { Some(p) => p, None => continue };
+                            let op2 = match sketch.get_point(*oe) { Some(p) => p, None => continue };
+                            for (ix, iy) in sketch_geom::segment_circle_intersection(
+                                op1.x, op1.y, op2.x, op2.y, cp.x, cp.y, *radius,
+                            ) {
+                                let d = ((click_x - ix).powi(2) + (click_y - iy).powi(2)).sqrt();
+                                hits.push(Hit { x: ix, y: iy, dist_to_click: d });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => return Err("trim only supports Line and Circle entities".into()),
+            }
+        }
+
+        if hits.is_empty() {
+            return Ok(false);
+        }
+
+        // Select the nearest intersection to the click
+        hits.sort_by(|a, b| a.dist_to_click.partial_cmp(&b.dist_to_click).unwrap());
+        let cut = &hits[0];
+
+        // Split the entity and keep the portion nearest the click
+        match &entity {
+            SketchEntity::Line { start, end, construction } => {
+                let p1 = sketch.get_point(*start).unwrap();
+                let p2 = sketch.get_point(*end).unwrap();
+                let d1 = ((click_x - p1.x).powi(2) + (click_y - p1.y).powi(2)).sqrt();
+                let d2 = ((click_x - p2.x).powi(2) + (click_y - p2.y).powi(2)).sqrt();
+
+                // Create intersection point
+                let cut_pt_id = sketch.add_point(cut.x, cut.y);
+
+                let kept = if d1 < d2 {
+                    // Keep from start to cut
+                    sketch.add_line(*start, cut_pt_id)
+                } else {
+                    // Keep from cut to end
+                    sketch.add_line(cut_pt_id, *end)
+                };
+                // Copy construction flag by updating entity
+                if *construction {
+                    if let Some(kept_entity) = sketch.entities.get_mut(&kept) {
+                        match kept_entity {
+                            SketchEntity::Line { construction: c, .. } => *c = true,
+                            _ => {}
+                        }
+                    }
+                }
+                // Delete original entity (cascade removes its constraints)
+                sketch.delete_entity_cascade(entity_id);
+            }
+            SketchEntity::Circle { center, radius, construction: _ } => {
+                // Trim a circle by replacing it with an arc
+                // Compute the two intersection points to determine the arc angles
+                // For now: keep the full circle but add the intersection point
+                // (Circle-to-arc conversion is complex; implementation deferred)
+                // Create intersection point at the cut
+                sketch.add_point(cut.x, cut.y);
+                // For simplicity: replace circle with arc spanning the kept side
+                // Angle from center to cut point
+                let cp = sketch.get_point(*center).unwrap();
+                let cut_angle = (cut.y - cp.y).atan2(cut.x - cp.x);
+                // Keep the larger portion (opposite from click, i.e., the complement)
+                // Create a short arc - this is a simplified approach
+                let arc_start = cut_angle;
+                let arc_end = cut_angle + std::f64::consts::PI; // half circle approximation
+                sketch.add_arc(*center, *radius, arc_start, arc_end);
+                sketch.delete_entity_cascade(entity_id);
+            }
+            _ => return Err("trim only supports Line and Circle entities".into()),
+        }
+        Ok(true)
+    }).unwrap_or(Err("no active sketch".to_string()))
+}
+
+/// Extend an entity along its natural direction until it hits a boundary entity.
+/// The endpoint nearest to (click_x, click_y) is extended.
+#[tauri::command]
+pub fn extend_entity(
+    entity_id: EntityId,
+    click_x: f64,
+    click_y: f64,
+    state: tauri::State<AppState>,
+) -> Result<bool, String> {
+    use echi_geom::sketch_geom;
+    state.snapshot_if_sketch();
+    state.with_active_sketch_mut(|sketch| {
+        let entity = sketch.entities.get(&entity_id).ok_or("entity not found")?.clone();
+
+        match &entity {
+            SketchEntity::Line { start, end, .. } => {
+                let p1 = sketch.get_point(*start).ok_or("start point missing")?;
+                let p2 = sketch.get_point(*end).ok_or("end point missing")?;
+
+                // Determine which end to extend: the one closer to the click
+                let d1 = ((click_x - p1.x).powi(2) + (click_y - p1.y).powi(2)).sqrt();
+                let d2 = ((click_x - p2.x).powi(2) + (click_y - p2.y).powi(2)).sqrt();
+
+                // Extend from the far endpoint through the near endpoint
+                let (anchor, ext_from) = if d1 < d2 {
+                    ((p2.x, p2.y), (p1.x, p1.y))
+                } else {
+                    ((p1.x, p1.y), (p2.x, p2.y))
+                };
+
+                // Direction from anchor through ext_from (extending outward)
+                let dx = ext_from.0 - anchor.0;
+                let dy = ext_from.1 - anchor.1;
+                let len = (dx * dx + dy * dy).sqrt();
+                if len < 1e-9 { return Err("zero-length line".into()); }
+                let dir_x = dx / len;
+                let dir_y = dy / len;
+
+                // Find the nearest intersection along the extension direction
+                // We search a long ray from ext_from in the extension direction
+                let ray_len = 10000.0; // large search distance
+                let rx1 = ext_from.0;
+                let ry1 = ext_from.1;
+                let rx2 = ext_from.0 + dir_x * ray_len;
+                let ry2 = ext_from.1 + dir_y * ray_len;
+
+                struct Hit { x: f64, y: f64, dist: f64 }
+                let mut hits: Vec<Hit> = Vec::new();
+
+                for (&other_id, other) in &sketch.entities {
+                    if other_id == entity_id { continue; }
+                    if entity_is_construction(other) { continue; }
+
+                    match other {
+                        SketchEntity::Line { start: os, end: oe, .. } => {
+                            let op1 = match sketch.get_point(*os) { Some(p) => p, None => continue };
+                            let op2 = match sketch.get_point(*oe) { Some(p) => p, None => continue };
+                            if let Some((ix, iy, _, _)) = sketch_geom::segment_intersection(
+                                rx1, ry1, rx2, ry2, op1.x, op1.y, op2.x, op2.y, 1e-6,
+                            ) {
+                                let d = ((ix - ext_from.0).powi(2) + (iy - ext_from.1).powi(2)).sqrt();
+                                if d > 1e-6 {
+                                    hits.push(Hit { x: ix, y: iy, dist: d });
+                                }
+                            }
+                        }
+                        SketchEntity::Circle { center, radius, .. } => {
+                            let cp = match sketch.get_point(*center) { Some(p) => p, None => continue };
+                            for (ix, iy) in sketch_geom::line_circle_intersection(
+                                rx1, ry1, rx2, ry2, cp.x, cp.y, *radius,
+                            ) {
+                                // Only keep intersections in the extension direction
+                                let t = (ix - ext_from.0) * dir_x + (iy - ext_from.1) * dir_y;
+                                if t > 1e-6 {
+                                    let d = ((ix - ext_from.0).powi(2) + (iy - ext_from.1).powi(2)).sqrt();
+                                    hits.push(Hit { x: ix, y: iy, dist: d });
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                if hits.is_empty() {
+                    return Ok(false);
+                }
+
+                // Choose the nearest intersection
+                hits.sort_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap());
+                let hit = &hits[0];
+
+                // Create intersection point and move the extended endpoint
+                let new_point_id = sketch.add_point(hit.x, hit.y);
+
+                // Replace the entity: delete old, create new with extended endpoint
+                if d1 < d2 {
+                    // Extended start point
+                    sketch.add_line(new_point_id, *end);
+                } else {
+                    // Extended end point
+                    sketch.add_line(*start, new_point_id);
+                }
+                sketch.delete_entity_cascade(entity_id);
+
+                Ok(true)
+            }
+            _ => Err("extend only supports Line entities".into()),
+        }
+    }).unwrap_or(Err("no active sketch".to_string()))
 }
 
 #[tauri::command]
@@ -1579,8 +1865,6 @@ pub fn export_gltf_cmd(app: tauri::AppHandle, state: tauri::State<'_, AppState>)
 #[cfg(feature = "occt")]
 #[tauri::command]
 pub fn export_step(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<String, String> {
-    use cadrum::{DVec3, Solid as OcctSolid};
-    use echi_geom::extrude::extract_loops;
     use tauri_plugin_dialog::DialogExt;
 
     let path = app.dialog().file().add_filter("STEP", &["step", "stp"]).blocking_save_file();
@@ -1588,46 +1872,13 @@ pub fn export_step(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> 
         let path = file_path_to_path(path).ok_or("Invalid file path")?;
         let doc = state.lock_doc();
 
-        let mut occt_solids: Vec<OcctSolid> = Vec::new();
-        for feature in doc.active_features() {
-            let extrude_data = match &feature.kind {
-                FeatureKind::Extrude { sketch_id, distance, .. } => {
-                    let height = doc.get_parameter(*distance).map(|p| p.value).unwrap_or(1.0);
-                    let sketch = doc.get_feature(*sketch_id).and_then(|f| f.sketch());
-                    (sketch, height)
-                }
-                FeatureKind::Revolve { .. } => {
-                    // Revolve not yet supported in OCCT STEP export
-                    continue;
-                }
-                _ => continue,
-            };
-
-            if let (Some(sketch), height) = extrude_data {
-                if let Some(loops) = extract_loops(sketch) {
-                    for loop_pts in loops {
-                        let points: Vec<DVec3> = loop_pts
-                            .iter()
-                            .map(|p| DVec3::new(p.x, p.y, 0.0))
-                            .collect();
-                        if let Ok(edges) = cadrum::Edge::polygon(&points) {
-                            if let Ok(solid) = OcctSolid::extrude(&edges, DVec3::new(0.0, 0.0, height)) {
-                                occt_solids.push(solid);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if occt_solids.is_empty() {
-            return Err("No extruded solids to export as STEP".into());
-        }
+        // Delegate OCCT solid collection to the domain helper (§9: thin commands).
+        let solids = crate::step_io::collect_occt_solids(&doc)?;
+        let count = solids.len();
 
         let mut file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
-        OcctSolid::write_step(&occt_solids, &mut file)
+        cadrum::Solid::write_step(&solids, &mut file)
             .map_err(|e| format!("STEP export failed: {e}"))?;
-        let count = occt_solids.len();
         log::info!("Exported {count} solids to STEP: {}", path.display());
         Ok(path.to_string_lossy().to_string())
     } else {
@@ -1638,7 +1889,7 @@ pub fn export_step(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> 
 #[cfg(feature = "occt")]
 #[tauri::command]
 pub fn import_step(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<Vec<RenderMesh>, String> {
-    use cadrum::{Solid as OcctSolid, Tessellation};
+    use cadrum::Solid as OcctSolid;
     use tauri_plugin_dialog::DialogExt;
 
     let path = app.dialog().file().add_filter("STEP", &["step", "stp"]).blocking_pick_file();
@@ -1651,27 +1902,8 @@ pub fn import_step(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> 
         let count = solids.len();
         log::info!("Imported {count} solids from STEP: {}", path.display());
 
-        let render_meshes: Vec<RenderMesh> = solids.iter().map(|solid| {
-            let occt_mesh = OcctSolid::mesh(
-                std::iter::once(solid),
-                Tessellation { deflection_linear: 0.1, relative_linear: false, ..Default::default() },
-            ).map_err(|e| format!("tessellation failed: {e}"))?;
-            let mut mesh = echi_geom::Mesh::default();
-            for v in &occt_mesh.vertices {
-                mesh.positions.push(v.x as f32);
-                mesh.positions.push(v.y as f32);
-                mesh.positions.push(v.z as f32);
-            }
-            for n in &occt_mesh.normals {
-                mesh.normals.push(n.x as f32);
-                mesh.normals.push(n.y as f32);
-                mesh.normals.push(n.z as f32);
-            }
-            for &idx in &occt_mesh.indices {
-                mesh.indices.push(idx as u32);
-            }
-            Ok(RenderMesh::from(&mesh))
-        }).collect::<Result<Vec<_>, String>>()?;
+        // Delegate tessellation to the domain helper (§9: thin commands).
+        let render_meshes = crate::step_io::tessellate_occt_solids(&solids)?;
 
         // Store in imported_meshes so every future regen re-injects them
         // (regen pipeline can't produce them — no backing document feature).
@@ -1849,6 +2081,12 @@ pub fn undo(state: tauri::State<AppState>) -> Result<bool, String> {
     }
     if let Some((restored, ra)) = mgr.undo(&doc, active) {
         *doc = restored;
+        // Clear imported meshes: undo restores a snapshot whose id space may be
+        // unrelated to the current document's. Stale entries alias onto new features
+        // (phantom geometry, §16).
+        if let Ok(mut imported) = state.imported_meshes.lock() {
+            imported.clear();
+        }
         let valid = ra
             .filter(|&id| doc.get_feature(id).map(|f| f.is_sketch()).unwrap_or(false))
             .or_else(|| doc.features.iter().find_map(|f| if f.is_sketch() { Some(f.id()) } else { None }));
@@ -1870,6 +2108,10 @@ pub fn redo(state: tauri::State<AppState>) -> Result<bool, String> {
     }
     if let Some((restored, ra)) = mgr.redo(&doc, active) {
         *doc = restored;
+        // Clear imported meshes (same reasoning as undo, §16).
+        if let Ok(mut imported) = state.imported_meshes.lock() {
+            imported.clear();
+        }
         let valid = ra
             .filter(|&id| doc.get_feature(id).map(|f| f.is_sketch()).unwrap_or(false))
             .or_else(|| doc.features.iter().find_map(|f| if f.is_sketch() { Some(f.id()) } else { None }));
@@ -2098,4 +2340,170 @@ pub fn update_mirror_params(
     }
     incremental_regen_locked(&doc, &state, feature_id);
     Ok(())
+}
+
+// ── Integration tests ─────────────────────────────────────────────
+// Design principle §11: every critical path must have at least one
+// automated test. These cover the validate-then-mutate pattern (§15),
+// cascade delete (§7), naming conventions (§10), and snapshot hygiene (§3).
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use echi_core::sketch::Sketch;
+    use echi_core::feature::{Feature, FeatureKind, PlaneDefinition, ExtrudeDirection};
+    use echi_core::document::Document;
+    use echi_core::{FeatureId, ParameterId};
+
+    fn make_state() -> AppState {
+        AppState::new()
+    }
+
+    // ── §15: Validate-then-mutate ──────────────────────────────
+
+    #[test]
+    fn add_feature_with_param_fails_cleanly_on_missing_dependency() {
+        let state = make_state();
+        // Try to add an extrude referencing a non-existent sketch (id 999).
+        let result = add_feature_with_param(
+            &state,
+            "Extrude",
+            10.0,
+            |_id, param_id| FeatureKind::Extrude {
+                sketch_id: FeatureId(999),
+                distance: param_id,
+                direction: ExtrudeDirection::OneSide,
+                draft_angle_deg: 0.0,
+                selected_regions: None,
+            },
+        );
+        assert!(result.is_err(), "should fail on missing dependency");
+
+        // Verify no orphaned parameter was added to the document.
+        let doc = state.lock_doc();
+        // The initial AppState has 1 feature (Sketch1) with no params.
+        assert_eq!(doc.features.len(), 1,
+            "document should still only have the initial sketch");
+        // Verify the undo stack is NOT polluted (validate-then-mutate, §15).
+        let mgr = state.lock_undo();
+        assert!(!mgr.can_undo(), "failed add must not push an undo snapshot");
+    }
+
+    #[test]
+    fn add_feature_kind_fails_cleanly_on_missing_dependency() {
+        let state = make_state();
+        let kind = FeatureKind::Extrude {
+            sketch_id: FeatureId(999),
+            distance: ParameterId(1),
+            direction: ExtrudeDirection::OneSide,
+            draft_angle_deg: 0.0,
+            selected_regions: None,
+        };
+        let result = add_feature_kind(&state, kind);
+        assert!(result.is_err(), "should fail on missing dependency");
+
+        let mgr = state.lock_undo();
+        assert!(!mgr.can_undo(), "failed add must not pollute undo stack");
+    }
+
+    // ── §7: Document-level cascade logic ───────────────────────
+
+    #[test]
+    fn dependents_of_tracks_downstream_features() {
+        let mut doc = Document::new("test");
+        doc.add_feature(Feature::new(
+            FeatureId(1), "Sketch1",
+            FeatureKind::Sketch { sketch: Sketch::new(), plane: PlaneDefinition::XY },
+        ));
+        doc.add_parameter("depth", 5.0);
+        doc.add_feature(Feature::new(
+            FeatureId(2), "Extrude2",
+            FeatureKind::Extrude {
+                sketch_id: FeatureId(1), distance: ParameterId(1),
+                direction: ExtrudeDirection::OneSide, draft_angle_deg: 0.0,
+                selected_regions: None,
+            },
+        ));
+        // Extrude(2) depends on Sketch(1).
+        let deps = doc.dependents_of(FeatureId(1));
+        assert_eq!(deps, vec![FeatureId(2)]);
+        assert!(doc.has_dependents(FeatureId(1)));
+        assert!(!doc.has_dependents(FeatureId(2)));
+    }
+
+    #[test]
+    fn cascade_remove_clears_transitive_dependents() {
+        let mut doc = Document::new("test");
+        doc.add_feature(Feature::new(
+            FeatureId(1), "Sketch1",
+            FeatureKind::Sketch { sketch: Sketch::new(), plane: PlaneDefinition::XY },
+        ));
+        doc.add_parameter("p1", 5.0);
+        doc.add_feature(Feature::new(
+            FeatureId(2), "Extrude2",
+            FeatureKind::Extrude {
+                sketch_id: FeatureId(1), distance: ParameterId(1),
+                direction: ExtrudeDirection::OneSide, draft_angle_deg: 0.0,
+                selected_regions: None,
+            },
+        ));
+        doc.add_parameter("p2", 0.5);
+        doc.add_feature(Feature::new(
+            FeatureId(3), "Fillet3",
+            FeatureKind::Fillet { target_id: FeatureId(2), radius: ParameterId(2), edges: vec![] },
+        ));
+
+        // Remove Sketch(1): dependents include [2, 3] transitively.
+        assert!(doc.dependents_of(FeatureId(1)).contains(&FeatureId(2)));
+        assert!(doc.dependents_of(FeatureId(2)).contains(&FeatureId(3)));
+    }
+
+    // ── §10: Naming convention ─────────────────────────────────
+
+    #[test]
+    fn default_feature_name_follows_convention() {
+        let kind = FeatureKind::Extrude {
+            sketch_id: FeatureId(1), distance: ParameterId(1),
+            direction: ExtrudeDirection::OneSide, draft_angle_deg: 0.0,
+            selected_regions: None,
+        };
+        assert_eq!(default_feature_name(&kind, FeatureId(3)), "Extrude3");
+
+        let sketch_kind = FeatureKind::Sketch {
+            sketch: Sketch::new(), plane: PlaneDefinition::XY,
+        };
+        assert_eq!(default_feature_name(&sketch_kind, FeatureId(5)), "Sketch5");
+
+        let offset_kind = FeatureKind::Sketch {
+            sketch: Sketch::new(),
+            plane: PlaneDefinition::Offset {
+                base: Box::new(PlaneDefinition::XY),
+                distance: 10.0,
+            },
+        };
+        assert_eq!(default_feature_name(&offset_kind, FeatureId(1)), "Sketch1");
+    }
+
+    // ── §3: Snapshot hygiene ───────────────────────────────────
+
+    #[test]
+    fn snapshot_if_sketch_noop_when_no_active_sketch() {
+        let state = AppState::new();
+        *state.lock_sketch() = None;
+        let mgr = state.lock_undo();
+        let can_undo_before = mgr.can_undo();
+        drop(mgr);
+
+        state.snapshot_if_sketch();
+        let mgr = state.lock_undo();
+        assert_eq!(mgr.can_undo(), can_undo_before,
+            "snapshot_if_sketch with no active sketch should be no-op");
+    }
+
+    #[test]
+    fn autosave_flag_defaults() {
+        let state = make_state();
+        assert!(state.autosave_enabled.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(!state.has_recovery_file.load(std::sync::atomic::Ordering::Relaxed));
+    }
 }

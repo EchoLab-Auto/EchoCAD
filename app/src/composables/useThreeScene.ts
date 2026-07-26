@@ -69,6 +69,10 @@ export function useThreeScene(): UseThreeSceneReturn {
       renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
     } catch (err) {
       console.error("[EchoCAD] WebGL renderer init failed:", err);
+      // Surface the failure so the user knows the viewport is non-functional (原则 §12).
+      import("@/stores/toast").then(({ useToastStore }) => {
+        useToastStore().error(`WebGL 初始化失败: ${err}`);
+      });
       return;
     }
     renderer.setSize(w, h);
@@ -218,12 +222,24 @@ export function useThreeScene(): UseThreeSceneReturn {
 }
 
 /// Map a string plane name to a { origin, normal, uDir, vDir } frame in 3D.
-export function planeFrame(planeName: string): {
+/// Supports base planes ("xy"/"yz"/"zx") and offset planes via optional
+/// `baseName` and `distance` parameters.
+export function planeFrame(planeName: string, baseName?: string | null, distance?: number | null): {
   origin: THREE.Vector3;
   normal: THREE.Vector3;
   uDir: THREE.Vector3;
   vDir: THREE.Vector3;
 } {
+  if (planeName === "offset" && baseName && distance != null) {
+    // Resolve the base plane, then offset along its normal.
+    const base = planeFrame(baseName);
+    return {
+      origin: base.origin.clone().add(base.normal.clone().multiplyScalar(distance)),
+      normal: base.normal.clone(),
+      uDir: base.uDir.clone(),
+      vDir: base.vDir.clone(),
+    };
+  }
   switch (planeName) {
     case "yz":
       return {

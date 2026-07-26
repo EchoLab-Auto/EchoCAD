@@ -4,6 +4,7 @@
 )]
 
 mod commands;
+mod step_io;
 
 use commands::{
     add_arc, add_circle, add_constraint, add_extrude_feature, add_line, add_point,
@@ -19,7 +20,7 @@ use commands::{
     get_solid_mesh, get_extrude_regions, load_project_from, preview_extrude, list_generators, list_plugins,
     load_project_cmd, move_point, move_point_no_snapshot, remove_constraint, save_project_cmd, save_project_to,
     set_active_sketch, solve_sketch, undo, redo, can_undo_redo, update_constraint_value,
-    update_entity_prop, delete_entity, delete_entity_no_snapshot, update_parameter, rename_feature,
+    update_entity_prop, delete_entity, delete_entity_no_snapshot, trim_entity, extend_entity, update_parameter, rename_feature,
     set_feature_suppressed, set_feature_color,
     measure_distance, measure_angle, get_mass_properties,
     update_linear_pattern, update_circular_pattern, update_mirror_params,
@@ -169,6 +170,8 @@ fn main() {
             update_entity_prop,
             delete_entity,
             delete_entity_no_snapshot,
+            trim_entity,
+            extend_entity,
             move_point,
             move_point_no_snapshot,
             clear_sketch,

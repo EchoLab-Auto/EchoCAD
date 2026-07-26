@@ -6,7 +6,7 @@ export const SNAP_PX = 12;
 export const SNAP_THRESHOLD_DEG = 4;
 export const STANDARD_ANGLES = [0, 45, 90, 135, 180, 225, 270, 315];
 
-export type SnapType = "endpoint" | "midpoint" | "center" | "intersection" | "grid" | "tangent";
+export type SnapType = "endpoint" | "midpoint" | "center" | "intersection" | "grid" | "tangent" | "on_line" | "on_circle" | "perpendicular";
 
 export interface SnapResult {
   type: SnapType;
@@ -23,6 +23,11 @@ export interface SketchInteractionState {
   /// to an existing point.  addPoint is called only on the second click, right
   /// before addLine, so that cancelling mid-draw leaves no orphan entity.
   lineStartPos: Ref<{ x: number; y: number } | null>;
+  /// EntityId of the very first point in the line chain. Used to detect when
+  /// the user clicks back on the origin, closing a polygon loop.
+  lineChainOriginId: Ref<EntityId | null>;
+  /// Deferred origin position for when the first click did not snap to a point.
+  lineChainOriginPos: Ref<{ x: number; y: number } | null>;
   // Rectangle drawing
   rectStart: Ref<{ x: number; y: number } | null>;
   // Arc drawing (3-step)
@@ -57,6 +62,8 @@ export function createSketchState(): SketchInteractionState {
   return {
     lineStartId: ref(null),
     lineStartPos: ref(null),
+    lineChainOriginId: ref(null),
+    lineChainOriginPos: ref(null),
     rectStart: ref(null),
     arcCenterId: ref(null),
     arcCenterPos: ref(null),
@@ -85,6 +92,8 @@ export function createSketchState(): SketchInteractionState {
 export function resetDrawingState(state: SketchInteractionState) {
   state.lineStartId.value = null;
   state.lineStartPos.value = null;
+  state.lineChainOriginId.value = null;
+  state.lineChainOriginPos.value = null;
   state.rectStart.value = null;
   state.arcCenterId.value = null;
   state.arcCenterPos.value = null;
@@ -185,6 +194,9 @@ export const SNAP_LABELS: Record<SnapType, string> = {
   intersection: "交点",
   grid: "网格",
   tangent: "相切",
+  on_line: "线上",
+  on_circle: "圆上",
+  perpendicular: "垂直",
 };
 
 export const SNAP_PRIORITY: Record<SnapType, number> = {
@@ -192,8 +204,11 @@ export const SNAP_PRIORITY: Record<SnapType, number> = {
   center: 1,
   midpoint: 2,
   intersection: 3,
-  grid: 4,
-  tangent: 5,
+  tangent: 4,
+  perpendicular: 5,
+  on_line: 6,
+  on_circle: 7,
+  grid: 8,
 };
 
 export function toolLabel(tool: Tool): string {
@@ -206,6 +221,8 @@ export function toolLabel(tool: Tool): string {
     spline: "样条",
     ellipse: "椭圆",
     plugin: "插件",
+    trim: "裁剪",
+    extend: "延伸",
   };
   return labels[tool];
 }

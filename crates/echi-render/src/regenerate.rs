@@ -185,7 +185,7 @@ fn regenerate_feature(
             // Try B-rep path first, then fall back to mesh
             #[cfg(feature = "brep")]
             let brep_mesh = _brep_kernel
-                .and_then(|kernel| extrude_via_brep(kernel, sketch, height, *direction, &plane));
+                .and_then(|kernel| extrude_via_brep(kernel, sketch, height, *direction, &plane, selected_regions.as_deref()));
             #[cfg(not(feature = "brep"))]
             let brep_mesh: Option<Mesh> = None;
 
@@ -524,9 +524,31 @@ fn extrude_via_brep(
     height: f64,
     direction: ExtrudeDirection,
     plane: &PlaneDefinition,
+    selected_regions: Option<&[usize]>,
 ) -> Option<Mesh> {
     // Extract closed loops from the sketch
-    let loops = extract_loops(sketch)?;
+    let mut loops = extract_loops(sketch)?;
+
+    // When specific loop indices are selected, filter to just those loops.
+    // Must match the sorted-by-area order from get_extrude_regions.
+    if let Some(indices) = selected_regions {
+        let mut indexed: Vec<(Vec<echi_geom::extrude::Point2D>, f64)> = loops
+            .into_iter()
+            .map(|l| {
+                let area = echi_geom::extrude::polygon_area(&l).abs();
+                (l, area)
+            })
+            .collect();
+        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        loops = indices.iter()
+            .filter_map(|&idx| indexed.get(idx).map(|(pts, _)| pts.clone()))
+            .collect();
+
+        if loops.is_empty() {
+            return None;
+        }
+    }
 
     // Multi-loop (holes) handled via OCCT boolean subtraction
     if loops.len() > 1 {
