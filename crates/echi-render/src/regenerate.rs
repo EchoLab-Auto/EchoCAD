@@ -166,7 +166,7 @@ fn regenerate_feature(
     }
 
     match &feature.kind {
-        FeatureKind::Sketch { .. } | FeatureKind::CustomSketch { .. } => {
+        FeatureKind::Sketch { .. } | FeatureKind::CustomSketch { .. } | FeatureKind::SketchModule { .. } => {
             // Sketch data is stored inline; no geometry to compute until referenced.
             Ok(())
         }

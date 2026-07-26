@@ -296,17 +296,16 @@ pub fn add_extrude_feature(...) -> Result<FeatureId, String> {
 
 ## 13. 迁移兼容性（Migration Compatibility）
 
-**原则：迁移期间新旧管线必须共存，通过 feature flag 切换，绝不能出现"中间状态不可用"。**
+**原则：精确几何管线为默认路径，网格管线仅作透明降级回退。管线切换对用户不可见。**
 
-在参数化 B-rep 管线迁移过程中（详见[参数化重构方案](./parametric-refactor-plan.md)）：
+本项目的几何管线已从双路径切换模式演进为**始终精确优先**：
 
-- 所有几何操作通过 `BrepKernel` trait 抽象
-- `AppState.use_brep: AtomicBool` 控制分发路径
-- 旧网格路径保留为降级回退，直到 P6 阶段才删除
-- 文件格式版本号 (`format_version`) 区分 v1（网格）和 v2（B-rep）格式
-- 旧项目文件可以通过独立的迁移工具批量升级
+- 所有几何操作通过 `BrepKernel` trait 抽象，再生时优先走 B-rep/OCCT 路径
+- 网格管线不再作为可选项暴露给用户——仅当 B-rep 无法处理（OCCT 未编译、几何过于复杂）时**自动回退**
+- 不存在用户可见的管线切换开关——精确几何是唯一的默认路径
+- 旧项目文件（网格格式）直接兼容，加载后自动走精确管线
 
-**反例（风险）**：在特性迁移到一半时删除旧 FeatureKind 变体，导致中间版本无法打开现有项目文件。
+**反例（风险）**：将网格管线作为用户可选路径暴露，导致用户不理解两种路径的差异而产生错误预期。
 
 ---
 
@@ -441,6 +440,7 @@ with_active_sketch_mut            get_all_solid_meshes / get_features / …
 
 ## 相关文档
 
-- [架构总览](./architecture.md) — crate 划分与数据流
-- [交互指南](./interaction-guide.md) — 用户视角的功能说明
-- [参数化重构方案](./parametric-refactor-plan.md) — B-rep 管线迁移的完整技术方案
+- [架构总览](../architecture.md) — crate 划分与数据流
+- [交互指南](../interaction-guide.md) — 用户视角的功能说明
+- [参数化重构方案](../parametric-refactor-plan.md) — B-rep 管线迁移的完整技术方案
+- [设计模式](./design-patterns.md) — 草图和拉伸系统的 9 个核心设计模式

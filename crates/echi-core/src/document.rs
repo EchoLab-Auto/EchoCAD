@@ -99,9 +99,53 @@ impl Document {
     /// Returns `true` if removing `id` would orphan downstream features.
     pub fn has_dependents(&self, id: FeatureId) -> bool {
         self.features.iter().any(|f| f.dependencies().contains(&id))
+            || self.features.iter().any(|f| f.parent_id == Some(id))
+    }
+
+    /// Find all features whose `parent_id` is `id`.
+    pub fn children_of(&self, id: FeatureId) -> Vec<FeatureId> {
+        self.features.iter()
+            .filter(|f| f.parent_id == Some(id))
+            .map(|f| f.id())
+            .collect()
+    }
+
+    /// Change a feature's parent. The feature is moved to just after the
+    /// parent in the feature list so regeneration order stays sensible.
+    pub fn reparent_to(&mut self, child_id: FeatureId, new_parent_id: FeatureId) -> bool {
+        let child_idx = match self.features.iter().position(|f| f.id() == child_id) { Some(i) => i, None => return false };
+        let parent_idx = match self.features.iter().position(|f| f.id() == new_parent_id) { Some(i) => i, None => return false };
+        if child_idx == parent_idx { return false; }
+        // Prevent circular: child's descendants must not include parent
+        if self.is_descendant_of(new_parent_id, child_id) { return false; }
+        self.features[child_idx].parent_id = Some(new_parent_id);
+        // Move to just after parent in the list
+        let f = self.features.remove(child_idx);
+        let insert_at = if child_idx < parent_idx { parent_idx } else { parent_idx + 1 };
+        let insert_at = insert_at.min(self.features.len());
+        self.features.insert(insert_at, f);
+        true
+    }
+
+    /// Detach a feature from its parent (make it top-level).
+    pub fn detach_from_parent(&mut self, id: FeatureId) -> bool {
+        if let Some(f) = self.features.iter_mut().find(|f| f.id() == id) {
+            f.parent_id = None;
+            true
+        } else { false }
+    }
+
+    fn is_descendant_of(&self, ancestor_id: FeatureId, target_id: FeatureId) -> bool {
+        let mut current = Some(target_id);
+        while let Some(id) = current {
+            if id == ancestor_id { return true; }
+            current = self.features.iter().find(|f| f.id() == id).and_then(|f| f.parent_id);
+        }
+        false
     }
 
     /// Remove a feature by ID. Returns the removed feature if it existed.
+    /// Also removes all child features (those with parent_id == id).
     ///
     /// **Caller responsibility:** check `has_dependents` first; downstream
     /// features that reference this one will silently fall back during
@@ -109,6 +153,20 @@ impl Document {
     pub fn remove_feature(&mut self, id: FeatureId) -> Option<Feature> {
         let idx = self.features.iter().position(|f| f.id() == id)?;
         Some(self.features.remove(idx))
+    }
+
+    /// Remove a feature and all its children recursively.
+    pub fn remove_feature_cascade(&mut self, id: FeatureId) -> Vec<FeatureId> {
+        let mut removed = Vec::new();
+        // Remove children first (their children are processed recursively)
+        let child_ids: Vec<FeatureId> = self.children_of(id);
+        for child_id in child_ids {
+            removed.extend(self.remove_feature_cascade(child_id));
+        }
+        if self.remove_feature(id).is_some() {
+            removed.push(id);
+        }
+        removed
     }
 
     /// Iterate features whose `suppressed` flag is false, in tree order.

@@ -392,6 +392,16 @@ export async function deleteEntityNoSnapshot(id: EntityId): Promise<boolean> {
   return invoke("delete_entity_no_snapshot", { id });
 }
 
+/** Move a feature under a new parent in the tree hierarchy. */
+export async function reparentFeature(childId: FeatureId, newParentId: FeatureId): Promise<boolean> {
+  return invoke("move_feature_under", { childId, newParentId });
+}
+
+/** Detach a feature from its parent (make it top-level). */
+export async function detachFeature(id: FeatureId): Promise<boolean> {
+  return invoke("detach_feature_child", { id });
+}
+
 /** Trim an entity at the nearest intersection with another entity.
  *  The clicked portion of the entity is kept. */
 export async function trimEntity(
@@ -446,14 +456,6 @@ export async function getAllSolidMeshes(): Promise<SolidMeshEntry[]> {
 
 export async function getRegenErrors(): Promise<Array<[FeatureId, string]>> {
   return invoke("get_regen_errors");
-}
-
-export async function getUseBrep(): Promise<boolean> {
-  return invoke("get_use_brep");
-}
-
-export async function setUseBrep(value: boolean): Promise<void> {
-  return invoke("set_use_brep", { value });
 }
 
 export async function captureViewport(): Promise<string> {

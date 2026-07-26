@@ -17,34 +17,48 @@
       @open-plugin="openPluginDialog"
       @offset-plane="openOffsetDialog"
       @clear-sketch="clearSketchAction"
-      @toggle-brep="toggleBrep"
       @toggle-measure="toggleMeasure"
     />
 
     <div class="workspace">
-      <!-- Left sidebar: Feature tree + plugins -->
+      <!-- Left sidebar: Feature tree + plugins with tab switcher -->
       <aside class="sidebar-left">
-        <FeatureTree
-          @select="selectFeature"
-          @edit="editFeature"
-          @contextmenu="onFeatureContextMenu"
-          @toggle-suppress="toggleSuppress"
-          @delete="deleteFeature"
-        />
+        <nav class="sidebar-tabs">
+          <button
+            :class="{ active: leftTab === 'tree' }"
+            @click="leftTab = 'tree'"
+          >特征树</button>
+          <button
+            :class="{ active: leftTab === 'plugins' }"
+            @click="leftTab = 'plugins'"
+          >插件</button>
+        </nav>
 
-        <!-- Plugin panel -->
-        <div class="panel" v-if="sketchStore.plugins.length > 0">
-          <h3>插件</h3>
-          <div v-for="plugin in sketchStore.plugins" :key="plugin.id" class="plugin-item">
-            <div class="plugin-header">
-              <span class="plugin-name">{{ plugin.name }}</span>
-              <span class="plugin-version">v{{ plugin.version }}</span>
+        <div v-show="leftTab === 'tree'">
+          <FeatureTree
+            @select="selectFeature"
+            @edit="editFeature"
+            @contextmenu="onFeatureContextMenu"
+            @toggle-suppress="toggleSuppress"
+            @delete="deleteFeature"
+            @reparent="onReparentFeature"
+          />
+        </div>
+
+        <div class="panel" v-show="leftTab === 'plugins'">
+          <template v-if="sketchStore.plugins.length > 0">
+            <div v-for="plugin in sketchStore.plugins" :key="plugin.id" class="plugin-item">
+              <div class="plugin-header">
+                <span class="plugin-name">{{ plugin.name }}</span>
+                <span class="plugin-version">v{{ plugin.version }}</span>
+              </div>
+              <div class="plugin-desc">{{ plugin.description }}</div>
+              <div v-for="gen in plugin.generators" :key="gen.id" class="plugin-generator" @click="openPluginDialog(gen)">
+                + {{ gen.name }}
+              </div>
             </div>
-            <div class="plugin-desc">{{ plugin.description }}</div>
-            <div v-for="gen in plugin.generators" :key="gen.id" class="plugin-generator" @click="openPluginDialog(gen)">
-              + {{ gen.name }}
-            </div>
-          </div>
+          </template>
+          <p v-else class="placeholder">暂无可用插件</p>
         </div>
       </aside>
 
@@ -111,6 +125,7 @@
     <ContextMenu
       :target="ctxMenu"
       :suppressed="ctxFeatureSuppressed"
+      :feature-type="ctxFeature?.feature_type"
       @edit-sketch="ctxEditSketch"
       @face-normal="ctxFaceNormal"
       @rename="ctxRename"
@@ -148,6 +163,7 @@ import {
   getRecentFiles, clearRecentFiles,
   undo, redo, listPlugins, listGenerators,
   generatePluginFeature,
+  reparentFeature,
   createOffsetPlane,
   type ParameterId,
   type GeneratorInfo,
@@ -158,6 +174,7 @@ const toastStore = useToastStore();
 const unifiedViewport = ref<InstanceType<typeof UnifiedViewport> | null>(null);
 const toolbarRef = ref<InstanceType<typeof Toolbar> | null>(null);
 const layoutRoot = ref<HTMLDivElement | null>(null);
+const leftTab = ref<"tree" | "plugins">("tree");
 
 // ── Composables ───────────────────────────────────────────────────
 
@@ -181,7 +198,7 @@ const {
   deleteFeature, confirmCascadeDelete, cancelCascade, cascadeDialog,
   toggleSuppress, renameSelectedFeature,
   onFeatureContextMenu, closeCtxMenu,
-  ctxMenu, ctxFeatureSuppressed,
+  ctxMenu, ctxFeature, ctxFeatureSuppressed,
   ctxRename, ctxDelete, ctxEditSketch, ctxToggleSuppress, ctxFaceNormal,
 } = useSketchActions(unifiedViewport, toolbarRef);
 
@@ -299,15 +316,6 @@ function onEdgeSelected(_featureId: number, _vA: number, _vB: number) {
 
 function toggleMeasure() {
   sketchStore.toggleMeasure();
-}
-
-async function toggleBrep() {
-  await sketchStore.toggleBrep();
-  // B-rep toggle triggers a full backend regen — feature errors can change
-  // (a feature may fail on one path and succeed on the other), so the
-  // feature tree must re-sync too (原则2).
-  await loadState();
-  await unifiedViewport.value?.refreshViewport();
 }
 
 /// Enter edge-pick mode from the PropertiesPanel (when editing an existing
@@ -550,7 +558,6 @@ async function onKeyDown(e: KeyboardEvent) {
       if (f) await deleteFeature(f.id);
       return;
     }
-    return;
   }
 
   switch (e.key) {
@@ -585,11 +592,26 @@ async function onKeyDown(e: KeyboardEvent) {
   }
 }
 
+// ── Drag-drop reparent ──────────────────────────────────────────
+
+async function onReparentFeature(childId: FeatureId, newParentId: FeatureId) {
+  try {
+    const ok = await reparentFeature(childId, newParentId);
+    if (ok) {
+      await loadState();
+      toastStore.success("已移动特征");
+    } else {
+      toastStore.error("无法移动：可能造成循环依赖");
+    }
+  } catch (err) {
+    toastStore.error(`移动失败: ${err}`);
+  }
+}
+
 // ── Lifecycle ─────────────────────────────────────────────────────
 
 onMounted(async () => {
   await loadState();
-  await sketchStore.initBrep();
   await refreshPlugins();
   await refreshRecent();
   layoutRoot.value?.focus();
@@ -624,13 +646,34 @@ onUnmounted(() => {
   background: #1e1e1e; color: #e0e0e0; outline: none;
 }
 .toolbar {
-  height: 36px; display: flex; align-items: center; gap: 2px;
-  padding: 0 8px; background: #2d2d2d; border-bottom: 1px solid #3c3c3c;
+  display: flex; flex-direction: column; background: #2d2d2d;
+  border-bottom: 1px solid #3c3c3c;
   flex-shrink: 0; user-select: none; z-index: 50;
 }
-.title { font-weight: 700; font-size: 13px; margin-right: 8px; }
-.tb-sep { width: 1px; height: 22px; background: #555; margin: 0 3px; flex-shrink: 0; }
+.tb-row {
+  display: flex; align-items: center; gap: 2px; flex-wrap: wrap;
+  padding: 2px 8px;
+}
+.tb-ws-btn {
+  padding: 4px 14px; font-size: 12px; color: #999;
+  background: transparent; border: 1px solid transparent; border-radius: 3px;
+  cursor: pointer; transition: color .15s, background .15s; flex-shrink: 0;
+}
+.tb-ws-btn:hover { color: #ccc; background: #3c3c3c; }
+.tb-ws-btn.active { color: #fff; background: #007acc; border-color: #007acc; }
+.title { font-weight: 700; font-size: 13px; margin-right: 8px; flex-shrink: 0; }
+.tb-sep { width: 1px; height: 22px; background: #555; margin: 0 3px; flex-shrink: 0; align-self: center; }
 .tb-spacer { flex: 1; }
+.tb-group {
+  display: flex; align-items: center; gap: 2px; flex-shrink: 0;
+  border: 1px solid #444; border-radius: 4px; padding: 2px 4px;
+  margin: 1px 0;
+}
+.tb-group-label {
+  font-size: 10px; color: #888; text-transform: uppercase;
+  letter-spacing: 0.5px; margin: 0 3px; flex-shrink: 0;
+  writing-mode: horizontal-tb;
+}
 
 .tb-menu { position: relative; flex-shrink: 0; }
 .tb-menu-btn {
@@ -695,8 +738,18 @@ button:hover .mm-key { color: #aac; }
 
 .workspace { flex: 1; display: flex; overflow: hidden; }
 .sidebar-left, .sidebar-right { width: 240px; background: #252526; overflow-y: auto; flex-shrink: 0; }
-.sidebar-left { border-right: 1px solid #3c3c3c; }
+.sidebar-left { border-right: 1px solid #3c3c3c; display: flex; flex-direction: column; }
 .sidebar-right { border-left: 1px solid #3c3c3c; }
+
+.sidebar-tabs { display: flex; flex-shrink: 0; border-bottom: 1px solid #3c3c3c; }
+.sidebar-tabs button {
+  flex: 1; padding: 8px 0; font-size: 12px; color: #999;
+  background: transparent; border: none; border-bottom: 2px solid transparent;
+  cursor: pointer; transition: color .15s, border-color .15s;
+}
+.sidebar-tabs button:hover { color: #ccc; }
+.sidebar-tabs button.active { color: #fff; border-bottom-color: #007acc; }
+
 .panel { padding: 12px; }
 .panel h3 { font-size: 11px; text-transform: uppercase; color: #999; margin-bottom: 8px; letter-spacing: 0.5px; display: flex; align-items: center; gap: 8px; }
 .err-badge { background: #c62828; color: #fff; padding: 1px 6px; border-radius: 8px; font-size: 10px; }
@@ -724,6 +777,7 @@ button:hover .mm-key { color: #aac; }
 .feature-tree li.suppressed { opacity: 0.45; font-style: italic; }
 .feature-tree li.errored { background: #4a2020; }
 .feature-tree li.errored.active { background: #6a3030; }
+.feature-tree li.drop-target { outline: 2px dashed #4fc3f7; outline-offset: -2px; background: #1a3a5c; }
 .suppress-btn {
   background: transparent; border: none; color: #aaa; cursor: pointer;
   font-size: 10px; padding: 0; line-height: 1; opacity: 0.6;

@@ -111,7 +111,7 @@ impl AppState {
             undo_manager: Mutex::new(UndoManager::new()),
             autosave_enabled: AtomicBool::new(true),
             has_recovery_file: AtomicBool::new(false),
-            use_brep: AtomicBool::new(false),
+            use_brep: AtomicBool::new(true),
             regen_dirty: AtomicBool::new(false),
             imported_meshes: Mutex::new(HashMap::new()),
         }
@@ -169,7 +169,7 @@ impl AppState {
         let id = active?;
         let feature = doc.get_feature_mut(id)?;
         match &mut feature.kind {
-            FeatureKind::Sketch { sketch, .. } | FeatureKind::CustomSketch { sketch, .. } => {
+            FeatureKind::Sketch { sketch, .. } | FeatureKind::CustomSketch { sketch, .. } | FeatureKind::SketchModule { sketch, .. } => {
                 let result = f(sketch);
                 // Sketch data changed — dependent solids are now stale.
                 // Regeneration happens lazily on the next mesh read
@@ -248,24 +248,18 @@ pub struct FeatureNode {
     pub suppressed: bool,
     pub has_dependents: bool,
     pub errors: Option<String>,
-    /// For sketch features, the plane the sketch lives on ("xy" / "yz" / "zx" / "offset").
     pub plane: Option<String>,
-    /// When `plane` is "offset", the base plane tag ("xy" | "yz" | "zx").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plane_base: Option<String>,
-    /// When `plane` is "offset", the signed distance along the base plane's normal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plane_distance: Option<f64>,
-    /// Optional per-feature color as a hex string (e.g. "#ff8800").
-    /// `None` means the renderer should use the default palette-based color.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
-    /// The primary upstream feature this feature modifies (Fillet/Chamfer/
-    /// Shell target, pattern/mirror target, extrude/revolve source sketch).
-    /// Exposed so the UI can act on the real dependency instead of guessing
-    /// by tree position (e.g. edge-pick for an existing fillet).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_id: Option<FeatureId>,
+    /// Parent feature ID for hierarchical tree display.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<FeatureId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -385,6 +379,21 @@ fn parameter_info(doc: &Document, id: ParameterId) -> Option<ParameterInfo> {
 fn feature_to_node(f: &Feature, doc: &Document, errors: &HashMap<FeatureId, String>) -> FeatureNode {
     let (ft, params) = match &f.kind {
         FeatureKind::Sketch { .. } => ("Sketch".to_string(), Vec::new()),
+        FeatureKind::SketchModule { source, .. } => {
+            if let Some(custom) = source {
+                let params: Vec<ParameterInfo> = custom.params.iter()
+                    .map(|(k, v)| ParameterInfo {
+                        id: ParameterId(0),
+                        name: k.clone(),
+                        value: *v,
+                        readonly: true,
+                    })
+                    .collect();
+                (format!("Module:{}:{}", custom.plugin_id, custom.generator_id), params)
+            } else {
+                ("SketchModule".to_string(), Vec::new())
+            }
+        }
         FeatureKind::CustomSketch { custom, .. } => {
             let params: Vec<ParameterInfo> = custom.params.iter()
                 .map(|(k, v)| ParameterInfo {
@@ -495,6 +504,7 @@ fn feature_to_node(f: &Feature, doc: &Document, errors: &HashMap<FeatureId, Stri
         plane_distance,
         color: f.color.clone(),
         target_id,
+        parent_id: f.parent_id,
     }
 }
 
@@ -542,6 +552,7 @@ fn default_feature_name(kind: &FeatureKind, id: FeatureId) -> String {
     let base = match kind {
         FeatureKind::Sketch { .. } => "Sketch",
         FeatureKind::CustomSketch { .. } => "Custom",
+        FeatureKind::SketchModule { .. } => "SketchModule",
         FeatureKind::Extrude { .. } => "Extrude",
         FeatureKind::Revolve { .. } => "Revolve",
         FeatureKind::Fillet { .. } => "Fillet",
@@ -916,18 +927,20 @@ pub fn delete_feature(
         }).to_string());
     }
 
-    // Cascade: repeatedly remove features that depend on this one.
+    // Cascade: repeatedly remove features that depend on this one,
+    // plus all child features (parent-child hierarchy).
     if cascade {
         let mut to_remove: Vec<FeatureId> = vec![id];
         let mut removed: std::collections::HashSet<FeatureId> = std::collections::HashSet::new();
         while let Some(rid) = to_remove.pop() {
-            if removed.contains(&rid) {
-                continue;
-            }
+            if removed.contains(&rid) { continue; }
+            // Dependents (Extrude depends on Sketch)
             for dep in doc.dependents_of(rid) {
-                if !removed.contains(&dep) {
-                    to_remove.push(dep);
-                }
+                if !removed.contains(&dep) { to_remove.push(dep); }
+            }
+            // Children (SketchModule parented under Sketch)
+            for child in doc.children_of(rid) {
+                if !removed.contains(&child) { to_remove.push(child); }
             }
             removed.insert(rid);
         }
@@ -935,6 +948,11 @@ pub fn delete_feature(
             doc.remove_feature(*rid);
         }
     } else {
+        // Also remove children when deleting without cascade prompt
+        let children = doc.children_of(id);
+        for child in &children {
+            doc.remove_feature(*child);
+        }
         doc.remove_feature(id);
     }
 
@@ -1200,6 +1218,30 @@ pub fn delete_entity(id: EntityId, state: tauri::State<AppState>) -> bool {
 #[tauri::command]
 pub fn delete_entity_no_snapshot(id: EntityId, state: tauri::State<AppState>) -> bool {
     state.with_active_sketch_mut(|s| !s.delete_entity_cascade(id).is_empty()).unwrap_or(false)
+}
+
+/// Move a feature under a new parent in the tree hierarchy.
+/// The feature is re-ordered to sit just after its new parent.
+#[tauri::command]
+pub fn move_feature_under(
+    child_id: FeatureId,
+    new_parent_id: FeatureId,
+    state: tauri::State<AppState>,
+) -> Result<bool, String> {
+    state.snapshot();
+    let mut doc = state.lock_doc();
+    Ok(doc.reparent_to(child_id, new_parent_id))
+}
+
+/// Detach a feature from its parent, making it a top-level feature.
+#[tauri::command]
+pub fn detach_feature_child(
+    id: FeatureId,
+    state: tauri::State<AppState>,
+) -> Result<bool, String> {
+    state.snapshot();
+    let mut doc = state.lock_doc();
+    Ok(doc.detach_from_parent(id))
 }
 
 /// Helper: check if a SketchEntity has a construction flag set to true.
@@ -1601,20 +1643,8 @@ pub fn get_regen_errors(state: tauri::State<AppState>) -> Vec<(FeatureId, String
 
 // ── B-rep toggle ────────────────────────────────────────────────
 
-/// Toggle whether regeneration uses the B-rep kernel for extrusion.
-/// When enabled, Extrude features will try the B-rep pipeline first
-/// (with graceful fallback to mesh when unsupported). Default: off.
-#[tauri::command]
-pub fn set_use_brep(value: bool, state: tauri::State<AppState>) {
-    state.use_brep.store(value, Ordering::Relaxed);
-    regenerate_state(&state);
-}
-
-/// Query whether the B-rep pipeline is currently enabled.
-#[tauri::command]
-pub fn get_use_brep(state: tauri::State<AppState>) -> bool {
-    state.use_brep.load(Ordering::Relaxed)
-}
+// B-rep pipeline is now always-on by default.
+// `use_brep` is initialised to `true` in AppState and no longer toggled at runtime.
 
 // ── Viewport capture ────────────────────────────────────────────
 
@@ -2058,10 +2088,10 @@ pub fn generate_plugin_feature(
     doc.add_feature(Feature::new(
         id,
         format!("{}_{}", gen_name, id.0),
-        FeatureKind::CustomSketch {
+        FeatureKind::SketchModule {
             sketch,
-            custom: CustomFeatureData { plugin_id, generator_id, params },
             plane: PlaneDefinition::default(),
+            source: Some(CustomFeatureData { plugin_id, generator_id, params }),
         },
     ));
     *state.lock_sketch() = Some(id);

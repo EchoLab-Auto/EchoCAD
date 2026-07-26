@@ -593,7 +593,8 @@ export function useSketchActions(
     if (!ctxMenu.value) return;
     const fid = ctxMenu.value.featureId;
     const f = sketchStore.features.find(x => x.id === fid);
-    if (f && (f.feature_type === "Sketch" || f.feature_type.startsWith("Custom:"))) {
+    const t = f?.feature_type ?? "";
+    if (t === "Sketch" || t === "SketchModule" || t.startsWith("Module:") || t.startsWith("Custom:")) {
       enterSketchEdit(fid);
     }
     closeCtxMenu();
@@ -654,6 +655,7 @@ export function useSketchActions(
     onFeatureContextMenu,
     closeCtxMenu,
     ctxMenu,
+    ctxFeature,
     ctxFeatureSuppressed,
     ctxRename,
     ctxDelete,

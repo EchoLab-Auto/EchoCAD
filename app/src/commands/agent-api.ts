@@ -46,7 +46,7 @@
  * | Query        | listFeatures, massProperties, measureDistance3D, measureAngle, regenErrors, allSolidMeshes |
  * | Plugins      | listPlugins, listGenerators, runGenerator |
  * | File         | save, saveTo, load, loadFrom, clearAll, exportStl, exportObj, exportGltf, exportStep, importStep, hasRecoveryFile |
- * | System       | undo, redo, canUndoRedo, captureViewport, setBrep, isBrepEnabled |
+ * | System       | undo, redo, canUndoRedo, captureViewport |
  */
 
 import {
@@ -62,7 +62,7 @@ import {
   createOffsetPlane, clearSketch, clearDocument,
   getMassProperties, measureDistance, measureAngle,
   saveProject, loadProject as loadProjectCmd, loadProjectFrom, saveProjectTo,
-  getUseBrep, setUseBrep, captureViewport,
+  captureViewport,
   undo, redo, canUndoRedo,
   getSketchEntities, getSketchConstraints, getRegenErrors,
   getExtrudeRegions, previewExtrude,
@@ -506,11 +506,6 @@ export class AgentCAD {
   async captureViewport(): Promise<string> {
     return captureViewport();
   }
-
-  /** Toggle B-rep pipeline (OCCT precise geometry). */
-  async setBrep(enabled: boolean): Promise<void> { await setUseBrep(enabled); }
-  /** Query whether B-rep pipeline is active. */
-  async isBrepEnabled(): Promise<boolean> { return getUseBrep(); }
 
   /** Save the current project. */
   async save(): Promise<string> { return saveProject(); }
