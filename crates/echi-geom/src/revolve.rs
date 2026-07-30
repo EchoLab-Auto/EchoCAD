@@ -2,12 +2,17 @@
 
 use echi_core::sketch::Sketch;
 use crate::extrude::{Mesh, Point2D};
+use crate::param_curve::{ParamLoop, sample_loop, loop_signed_area};
 
 /// Revolve a sketch profile around a user-defined axis.
 ///
 /// `axis_start` and `axis_end` define the axis of revolution as a line in the sketch (XY) plane.
 /// If both are `None`, defaults to Y axis (x=0).
 /// `total_angle` in radians; `segments` controls angular resolution.
+///
+/// Supports multi-region sketches: outer profiles and hole profiles are classified
+/// automatically using the same algorithm as extrude. Holes are revolved separately
+/// and subtracted from the outer revolve via boolean operations.
 pub fn revolve(
     sketch: &Sketch,
     total_angle: f64,
@@ -15,10 +20,74 @@ pub fn revolve(
     axis_start: Option<(f64, f64)>,
     axis_end: Option<(f64, f64)>,
 ) -> Option<Mesh> {
-    let (profile, profile_closed) = extract_profile(sketch)?;
-    if profile.len() < 2 {
-        return None;
+    let param_loops = crate::extrude::extract_param_loops(sketch)?;
+    if param_loops.is_empty() { return None; }
+
+    // Classify loops as outers/holes (same algorithm as extrude_loops)
+    let mut classified: Vec<(ParamLoop, f64, (f64, f64))> = param_loops.iter().map(|l| {
+        let area = loop_signed_area(l); let ccw = area > 0.0;
+        let mut l = l.clone(); if !ccw { l.reverse(); }
+        let centroid = crate::param_curve::loop_centroid(&l); (l, area.abs(), centroid)
+    }).collect();
+    classified.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut outers: Vec<ParamLoop> = Vec::new();
+    let mut hole_groups: Vec<Vec<ParamLoop>> = Vec::new();
+    let mut all_loops: Vec<(ParamLoop, bool)> = Vec::new();
+    for (i, (_lp, _area, centroid)) in classified.iter().enumerate() {
+        let (cx, cy) = *centroid;
+        let mut container_is_outer = false;
+        let mut container_idx: Option<usize> = None;
+        let mut container_area: f64 = f64::MAX;
+        for (j, (cl, is_outer)) in all_loops.iter().enumerate() {
+            let a = loop_signed_area(cl).abs();
+            if a < container_area && crate::param_curve::point_in_param_loop(cx, cy, cl) {
+                container_idx = Some(j); container_area = a; container_is_outer = *is_outer;
+            }
+        }
+        match container_idx {
+            Some(j) if container_is_outer => {
+                let mut h = classified[i].0.clone(); h.reverse();
+                let outer_count = all_loops[..j].iter().filter(|(_, o)| *o).count();
+                hole_groups[outer_count].push(h); all_loops.push((classified[i].0.clone(), false));
+            }
+            _ => { outers.push(classified[i].0.clone()); hole_groups.push(Vec::new()); all_loops.push((classified[i].0.clone(), true)); }
+        }
     }
+
+    // Revolve each outer + subtract its holes
+    let mut combined = Mesh::default();
+    for (i, outer) in outers.iter().enumerate() {
+        let outer_mesh = revolve_single(outer, total_angle, segments, axis_start, axis_end)?;
+        let mut result = outer_mesh;
+        for hole in &hole_groups[i] {
+            if let Some(hole_mesh) = revolve_single(hole, total_angle, segments, axis_start, axis_end) {
+                let diff = crate::boolean_op(&result, &hole_mesh, "subtract");
+                if diff.vertex_count() > 0 {
+                    result = diff;
+                }
+            }
+        }
+        let voff = combined.vertex_count() as u32;
+        combined.positions.extend_from_slice(&result.positions);
+        combined.normals.extend_from_slice(&result.normals);
+        for &idx in &result.indices { combined.indices.push(voff + idx); }
+    }
+    if combined.vertex_count() == 0 { None } else { Some(combined) }
+}
+
+/// Revolve a single parametric profile (no hole handling).
+fn revolve_single(
+    param_loop: &ParamLoop,
+    total_angle: f64,
+    segments: u32,
+    axis_start: Option<(f64, f64)>,
+    axis_end: Option<(f64, f64)>,
+) -> Option<Mesh> {
+    let profile: Vec<(f64, f64)> = sample_loop(param_loop, 0.005);
+    if profile.len() < 2 { return None; }
+    // Check if the profile is closed (parametric loops are always closed)
+    let profile_closed = true;
 
     // Determine axis in the XY sketch plane
     let (ax, ay, bx, by) = match (axis_start, axis_end) {
@@ -206,45 +275,6 @@ pub fn revolve(
         normals,
         indices,
     })
-}
-
-/// Extract a 2D profile (ordered point list) from sketch entities, plus a
-/// flag telling whether the profile forms a CLOSED loop. Uses the shared
-/// loop extractor, so arcs, circles, splines and mixed line/arc chains all
-/// work — previously only straight lines were followed and arcs silently
-/// truncated the profile (原则8).
-fn extract_profile(sketch: &Sketch) -> Option<(Vec<(f64, f64)>, bool)> {
-    let loops = crate::extrude::extract_loops(sketch)?;
-    // Revolve uses the largest-area loop as the profile.
-    let mut best: Option<(Vec<(f64, f64)>, bool)> = None;
-    let mut best_area = 0.0f64;
-    for lp in loops {
-        let mut area = 0.0;
-        let n = lp.len();
-        for i in 0..n {
-            let j = (i + 1) % n;
-            area += lp[i].x * lp[j].y - lp[j].x * lp[i].y;
-        }
-        let area = area.abs() / 2.0;
-        if area > best_area {
-            best_area = area;
-            // A closed loop from extract_loops ends where it started
-            // (closing edge tessellated back to the start point). Strip the
-            // duplicate and remember closure.
-            let mut pts: Vec<(f64, f64)> = lp.iter().map(|p| (p.x, p.y)).collect();
-            let mut closed = false;
-            if pts.len() >= 2 {
-                let f = pts[0];
-                let l = pts[pts.len() - 1];
-                if ((f.0 - l.0).powi(2) + (f.1 - l.1).powi(2)).sqrt() < 1e-9 {
-                    pts.pop();
-                    closed = true;
-                }
-            }
-            best = Some((pts, closed));
-        }
-    }
-    best
 }
 
 #[cfg(test)]

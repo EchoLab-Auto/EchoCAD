@@ -86,6 +86,105 @@ pub fn build_occt_solid(doc: &Document, feature_id: FeatureId) -> Option<cadrum:
             };
             Some(result)
         }
+        FeatureKind::Revolve { sketch_id, angle, .. } => {
+            let angle_rad = doc.get_parameter(*angle).map(|p| p.value).unwrap_or(2.0 * std::f64::consts::PI);
+            let sketch = doc.get_feature(*sketch_id).and_then(|f| f.sketch())?;
+            let loops = extract_loops(sketch)?;
+            if loops.is_empty() { return None; }
+            // Revolve via sweep around a circular spine (same approach as occt_revolve_via_sketch)
+            let profile_pts: Vec<DVec3> = loops[0].iter().map(|p| DVec3::new(p.x, p.y, 0.0)).collect();
+            let profile_edges = cadrum::Edge::polygon(&profile_pts).ok()?;
+            // Build a circular spine for the revolve around Y axis
+            let n_seg = 64usize;
+            let radius = profile_pts.iter().map(|p| (p.x.powi(2) + p.y.powi(2)).sqrt()).fold(0.0f64, f64::max).max(1.0);
+            let spine_pts: Vec<DVec3> = (0..=n_seg).map(|i| {
+                let a = angle_rad * i as f64 / n_seg as f64;
+                DVec3::new(radius * a.cos(), 0.0, radius * a.sin())
+            }).collect();
+            let spine_edges: Vec<_> = spine_pts.windows(2)
+                .filter_map(|w| cadrum::Edge::polygon(&[w[0], w[1]]).ok()).flatten().collect();
+            if spine_edges.is_empty() { return None; }
+            use cadrum::ProfileOrient;
+            OcctSolid::sweep(&profile_edges, &spine_edges, ProfileOrient::Fixed).ok()
+        }
+        FeatureKind::Sweep { profile_sketch_id, path_sketch_id } => {
+            let profile_sketch = doc.get_feature(*profile_sketch_id).and_then(|f| f.sketch())?;
+            let path_sketch = doc.get_feature(*path_sketch_id).and_then(|f| f.sketch())?;
+            let profile_loops = extract_loops(profile_sketch)?;
+            let path_loops = extract_loops(path_sketch)?;
+            if profile_loops.is_empty() || path_loops.is_empty() { return None; }
+            let profile_pts: Vec<DVec3> = profile_loops[0].iter().map(|p| DVec3::new(p.x, p.y, 0.0)).collect();
+            let path_pts: Vec<DVec3> = path_loops[0].iter().map(|p| DVec3::new(p.x, p.y, 0.0)).collect();
+            let profile_edges = cadrum::Edge::polygon(&profile_pts).ok()?;
+            if path_pts.len() < 2 { return None; }
+            let spine_edges: Vec<_> = path_pts.windows(2)
+                .filter_map(|w| cadrum::Edge::polygon(&[w[0], w[1]]).ok()).flatten().collect();
+            if spine_edges.is_empty() { return None; }
+            use cadrum::ProfileOrient;
+            OcctSolid::sweep(&profile_edges, &spine_edges, ProfileOrient::Fixed).ok()
+        }
+        FeatureKind::Fillet { target_id, radius, .. } => {
+            let r = doc.get_parameter(*radius).map(|p| p.value).unwrap_or(0.5);
+            let solid = build_occt_solid(doc, *target_id)?;
+            let edges: Vec<&cadrum::Edge> = solid.iter_edge().collect();
+            if edges.is_empty() { return Some(solid); }
+            solid.fillet_edges(r, edges).ok()
+        }
+        FeatureKind::Chamfer { target_id, distance, .. } => {
+            let d = doc.get_parameter(*distance).map(|p| p.value).unwrap_or(0.5);
+            let solid = build_occt_solid(doc, *target_id)?;
+            let edges: Vec<&cadrum::Edge> = solid.iter_edge().collect();
+            if edges.is_empty() { return Some(solid); }
+            solid.chamfer_edges(d, edges).ok()
+        }
+        FeatureKind::Shell { target_id, thickness } => {
+            let t = doc.get_parameter(*thickness).map(|p| p.value).unwrap_or(0.5);
+            let solid = build_occt_solid(doc, *target_id)?;
+            solid.shell(t, std::iter::empty()).ok()
+        }
+        FeatureKind::LinearPattern { target_id, dir_x, dir_y, dir_z, count, spacing } => {
+            if *count < 2 { return build_occt_solid(doc, *target_id); }
+            let base = build_occt_solid(doc, *target_id)?;
+            let dir = DVec3::new(*dir_x, *dir_y, *dir_z);
+            let len = (dir.x.powi(2) + dir.y.powi(2) + dir.z.powi(2)).sqrt();
+            if len < 1e-10 { return Some(base); }
+            let step = DVec3::new(dir.x / len * spacing, dir.y / len * spacing, dir.z / len * spacing);
+            let mut combined: Option<OcctSolid> = None;
+            for i in 0..*count {
+                let offset = DVec3::new(step.x * i as f64, step.y * i as f64, step.z * i as f64);
+                let instance = base.clone().translate(offset);
+                combined = match combined {
+                    None => Some(instance),
+                    Some(c) => (cadrum::Boolean::from(&c) + &instance).build().ok(),
+                };
+            }
+            combined
+        }
+        FeatureKind::CircularPattern { target_id, axis_x, axis_y, axis_z, axis_dx, axis_dy, axis_dz, count, total_angle_deg } => {
+            if *count < 2 { return build_occt_solid(doc, *target_id); }
+            let base = build_occt_solid(doc, *target_id)?;
+            let axis_origin = DVec3::new(*axis_x, *axis_y, *axis_z);
+            let axis_dir = DVec3::new(*axis_dx, *axis_dy, *axis_dz);
+            let angle_step = total_angle_deg.to_radians() / (*count - 1) as f64;
+            let mut combined: Option<OcctSolid> = None;
+            for i in 0..*count {
+                let angle = angle_step * i as f64;
+                let instance = base.clone().rotate(axis_origin, axis_dir, angle);
+                combined = match combined {
+                    None => Some(instance),
+                    Some(c) => (cadrum::Boolean::from(&c) + &instance).build().ok(),
+                };
+            }
+            combined
+        }
+        FeatureKind::Mirror { target_id, plane_nx, plane_ny, plane_nz, plane_px, plane_py, plane_pz } => {
+            let base = build_occt_solid(doc, *target_id)?;
+            let mirrored = base.clone().mirror(
+                DVec3::new(*plane_px, *plane_py, *plane_pz),
+                DVec3::new(*plane_nx, *plane_ny, *plane_nz),
+            );
+            (cadrum::Boolean::from(&base) + &mirrored).build().ok()
+        }
         _ => None,
     }
 }

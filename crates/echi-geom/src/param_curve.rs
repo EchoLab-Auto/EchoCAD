@@ -26,6 +26,14 @@ pub enum ParamCurve {
     },
     /// Full circle (a complete loop by itself).
     Circle { center: (f64, f64), radius: f64 },
+    /// Cubic Bezier curve defined by 4 control points.
+    Bezier { p0: (f64, f64), p1: (f64, f64), p2: (f64, f64), p3: (f64, f64) },
+    /// B-spline defined by control points, knot vector, and degree.
+    BSpline {
+        control_points: Vec<(f64, f64)>,
+        knots: Vec<f64>,
+        degree: u32,
+    },
     /// Elliptical arc defined by center, major axis vector, and ratio.
     EllipseArc {
         center: (f64, f64),
@@ -66,10 +74,10 @@ pub fn curve_signed_area(curve: &ParamCurve) -> f64 {
             let tri = 0.5 * r * (cx * (ea.sin() - sa.sin()) - cy * (ea.cos() - sa.cos()));
             sector + tri
         }
-        ParamCurve::EllipseArc { .. } => {
-            // Fall back to polygon area for ellipses (exact elliptic integral
-            // is complex; we sample adaptively for area too)
-            0.0 // Will be handled by the loop-level function
+        ParamCurve::EllipseArc { .. } | ParamCurve::Bezier { .. } | ParamCurve::BSpline { .. } => {
+            // Fall back to sampled polygon area (exact integrals are complex
+            // for ellipses and splines). Handled by the loop-level function.
+            0.0
         }
     }
 }
@@ -200,8 +208,8 @@ pub fn point_in_param_loop(px: f64, py: f64, ploop: &ParamLoop) -> bool {
                     }
                 }
             }
-            ParamCurve::EllipseArc { .. } => {
-                // Fall back: sample the ellipse and test against polygon edges
+            ParamCurve::EllipseArc { .. } | ParamCurve::Bezier { .. } | ParamCurve::BSpline { .. } => {
+                // Fall back: sample the curve and test against polygon edges
                 let pts = sample_curve(curve, 0.01);
                 for w in pts.windows(2) {
                     if ray_crosses_segment(px, py, w[0].0, w[0].1, w[1].0, w[1].1) {
@@ -263,6 +271,51 @@ fn point_on_segment(px: f64, py: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> boo
     (px - proj_x).abs() < 1e-9 && (py - proj_y).abs() < 1e-9
 }
 
+// ── Bezier / B-spline evaluators ──────────────────────────────────────
+
+/// Evaluate a cubic Bezier curve at parameter t ∈ [0,1] using de Casteljau.
+pub fn de_casteljau(p0: (f64, f64), p1: (f64, f64), p2: (f64, f64), p3: (f64, f64), t: f64) -> (f64, f64) {
+    let t1 = 1.0 - t;
+    let q0 = (p0.0 * t1 + p1.0 * t, p0.1 * t1 + p1.1 * t);
+    let q1 = (p1.0 * t1 + p2.0 * t, p1.1 * t1 + p2.1 * t);
+    let q2 = (p2.0 * t1 + p3.0 * t, p2.1 * t1 + p3.1 * t);
+    let r0 = (q0.0 * t1 + q1.0 * t, q0.1 * t1 + q1.1 * t);
+    let r1 = (q1.0 * t1 + q2.0 * t, q1.1 * t1 + q2.1 * t);
+    (r0.0 * t1 + r1.0 * t, r0.1 * t1 + r1.1 * t)
+}
+
+/// Find the index of the knot span containing `t` for a B-spline.
+fn find_knot_span(knots: &[f64], degree: u32, t: f64) -> usize {
+    let n = knots.len() - degree as usize - 2;
+    let t_clamped = t.clamp(knots[degree as usize], knots[knots.len() - degree as usize - 1]);
+    for i in (degree as usize)..=n {
+        if t_clamped >= knots[i] && t_clamped < knots[i + 1] {
+            return i;
+        }
+    }
+    n
+}
+
+/// Evaluate a B-spline at parameter t using Cox-de Boor recursion.
+pub fn cox_de_boor(control_points: &[(f64, f64)], knots: &[f64], degree: u32, t: f64) -> (f64, f64) {
+    if control_points.len() <= degree as usize { return control_points[0]; }
+    let span = find_knot_span(knots, degree, t);
+    let mut d: Vec<(f64, f64)> = Vec::with_capacity((degree + 1) as usize);
+    for j in 0..=degree as usize {
+        d.push(control_points[span - degree as usize + j]);
+    }
+    for k in 1..=degree as usize {
+        for j in (k..=degree as usize).rev() {
+            let alpha = if knots[span + j - k + 1] - knots[span - degree as usize + j] > 1e-12 {
+                (t - knots[span - degree as usize + j]) / (knots[span + j - k + 1] - knots[span - degree as usize + j])
+            } else { 0.0 };
+            d[j] = (d[j - 1].0 * (1.0 - alpha) + d[j].0 * alpha,
+                     d[j - 1].1 * (1.0 - alpha) + d[j].1 * alpha);
+        }
+    }
+    d[degree as usize]
+}
+
 // ── Adaptive sampling ─────────────────────────────────────────────────
 
 /// Sample a single curve into polyline points with given chord error tolerance.
@@ -320,6 +373,34 @@ pub fn sample_curve(curve: &ParamCurve, chord_error: f64) -> Vec<(f64, f64)> {
             }
             pts
         }
+        ParamCurve::Bezier { p0, p1, p2, p3 } => {
+            // Adaptive subdivision: compute chord error and subdivide if needed
+            let chord = ((p3.0 - p0.0).powi(2) + (p3.1 - p0.1).powi(2)).sqrt();
+            let n = (chord / chord_error.max(1e-6)).ceil() as usize;
+            let n = n.clamp(2, 256);
+            let mut pts = Vec::with_capacity(n + 1);
+            for i in 0..=n {
+                let t = i as f64 / n as f64;
+                pts.push(de_casteljau(*p0, *p1, *p2, *p3, t));
+            }
+            pts
+        }
+        ParamCurve::BSpline { control_points, knots, degree } => {
+            let n_cp = control_points.len();
+            if n_cp <= *degree as usize { return control_points.clone(); }
+            // Sample uniformly in knot span range
+            let t_min = knots[*degree as usize];
+            let t_max = knots[knots.len() - *degree as usize - 1];
+            let span_len = t_max - t_min;
+            let n = (span_len / chord_error.max(1e-6)).ceil() as usize;
+            let n = n.clamp(n_cp * 4, 512);
+            let mut pts = Vec::with_capacity(n + 1);
+            for i in 0..=n {
+                let t = t_min + span_len * i as f64 / n as f64;
+                pts.push(cox_de_boor(control_points, knots, *degree, t));
+            }
+            pts
+        }
     }
 }
 
@@ -372,6 +453,66 @@ fn circle_segments(radius: f64, chord_error: f64, span: f64) -> usize {
 /// Convert a sampled polygon (Vec<(f64,f64)>) to Vec<Point2D> for backward compat.
 pub fn to_point2d_vec(pts: &[(f64, f64)]) -> Vec<crate::extrude::Point2D> {
     pts.iter().map(|&(x, y)| crate::extrude::Point2D { x, y }).collect()
+}
+
+// ── Offset curves ────────────────────────────────────────────────────
+
+/// Offset a single curve by `distance` along its normal (positive = outward
+/// for CCW curves). Lines and arcs use exact formulas; other types fall back
+/// to numerical offset (sample, offset normals, resample).
+pub fn offset_curve(curve: &ParamCurve, distance: f64) -> Vec<ParamCurve> {
+    match curve {
+        ParamCurve::Line { start, end } => {
+            let dx = end.0 - start.0; let dy = end.1 - start.1;
+            let len = (dx*dx + dy*dy).sqrt();
+            if len < 1e-12 { return vec![curve.clone()]; }
+            let nx = -dy / len; let ny = dx / len; // left normal (CCW outward)
+            vec![ParamCurve::Line {
+                start: (start.0 + nx * distance, start.1 + ny * distance),
+                end: (end.0 + nx * distance, end.1 + ny * distance),
+            }]
+        }
+        ParamCurve::Circle { center, radius } => {
+            let new_r = radius + distance;
+            if new_r <= 0.0 { return vec![]; }
+            vec![ParamCurve::Circle { center: *center, radius: new_r }]
+        }
+        ParamCurve::Arc { center, radius, start_angle, end_angle } => {
+            let new_r = radius + distance;
+            if new_r <= 0.0 { return vec![]; }
+            vec![ParamCurve::Arc {
+                center: *center, radius: new_r,
+                start_angle: *start_angle, end_angle: *end_angle,
+            }]
+        }
+        // For curves without exact offset formulas, sample and offset numerically
+        _ => {
+            let pts = sample_curve(curve, 0.01);
+            if pts.len() < 2 { return vec![]; }
+            let mut result: Vec<ParamCurve> = Vec::new();
+            for w in pts.windows(2) {
+                let dx = w[1].0 - w[0].0; let dy = w[1].1 - w[0].1;
+                let len = (dx*dx + dy*dy).sqrt();
+                if len < 1e-12 { continue; }
+                let nx = -dy / len; let ny = dx / len;
+                result.push(ParamCurve::Line {
+                    start: (w[0].0 + nx * distance, w[0].1 + ny * distance),
+                    end: (w[1].0 + nx * distance, w[1].1 + ny * distance),
+                });
+            }
+            result
+        }
+    }
+}
+
+/// Offset an entire closed loop inward/outward. Positive distance = outward
+/// (larger), negative = inward (smaller). Returns a new ParamLoop.
+pub fn offset_loop(ploop: &ParamLoop, distance: f64) -> ParamLoop {
+    let mut result: ParamLoop = Vec::new();
+    for curve in ploop {
+        result.extend(offset_curve(curve, distance));
+    }
+    result
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────

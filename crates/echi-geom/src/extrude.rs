@@ -558,22 +558,35 @@ fn triangulate_with_holes(outer: &[Point2D], holes: &[Vec<Point2D>]) -> Vec<[usi
     // polygon topology that confuses the ear clipper).
     let mut used_bridge_vertices: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
-    // Bridge each hole into the polygon. Process in reverse so hole_starts
-    // indices (relative to `all`) stay valid.
-    for (hi, hole_start) in hole_starts.iter().enumerate().rev() {
+    // Pre-compute the minimum outer-vertex-to-hole distance for each hole.
+    // Sort holes by this distance DESCENDING (farthest first) so the hole
+    // with the worst fit gets first pick of bridge locations. This prevents
+    // all bridges clustering near the same outer vertex when holes have
+    // similar closest-vertex candidates.
+    let mut hole_order: Vec<(usize, f64)> = holes.iter().enumerate().map(|(hi, hole)| {
+        let mut min_d = f64::MAX;
+        for &pi in &polygon {
+            let pi_in_any_hole = hole_ranges.iter().any(|&(start, end)| pi >= start && pi < end);
+            if pi_in_any_hole { continue; }
+            for hp in hole.iter() {
+                let d = (all[pi].x - hp.x).powi(2) + (all[pi].y - hp.y).powi(2);
+                if d < min_d { min_d = d; }
+            }
+        }
+        (hi, min_d)
+    }).collect();
+    hole_order.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Bridge each hole into the polygon in farthest-first order.
+    for &(hi, _) in &hole_order {
+        let hole_start = hole_starts[hi];
         let hole = &holes[hi];
         // Find closest pair between an OUTER polygon vertex and any hole vertex.
         let mut best: Option<(usize, usize, f64)> = None;
         for (i, &pi) in polygon.iter().enumerate() {
-            // Skip vertices belonging to ANY hole — only bridge from outer boundary
             let pi_in_any_hole = hole_ranges.iter().any(|&(start, end)| pi >= start && pi < end);
-            if pi_in_any_hole {
-                continue;
-            }
-            // Skip outer vertices already used as bridge endpoints for other holes
-            if used_bridge_vertices.contains(&pi) {
-                continue;
-            }
+            if pi_in_any_hole { continue; }
+            if used_bridge_vertices.contains(&pi) { continue; }
             for (hj, hp) in hole.iter().enumerate() {
                 let global_hj = hole_start + hj;
                 let d = (all[pi].x - hp.x).powi(2) + (all[pi].y - hp.y).powi(2);
@@ -1260,8 +1273,34 @@ pub fn extract_param_loops(sketch: &Sketch) -> Option<Vec<ParamLoop>> {
                 // Skip here to avoid duplicates.
             }
             SketchEntity::Spline { control_points, construction } if !*construction => {
-                for w in control_points.windows(2) {
-                    edges.push(EdgeRef { entity_id: id, a: w[0], b: w[1], kind: EdgeKind::Line });
+                // Map spline control points to a cubic B-spline. Generate a
+                // uniform clamped knot vector: [0,0,0,0, 1,2,...,n-3, n,n,n,n]
+                // where n = control_points.len() - degree.
+                let cp_ids: Vec<EntityId> = control_points.clone();
+                let cp_coords: Vec<(f64, f64)> = cp_ids.iter()
+                    .filter_map(|&eid| sketch.get_point(eid).map(|p| (p.x, p.y)))
+                    .collect();
+                if cp_coords.len() >= 4 {
+                    // Build a cubic B-spline with uniform clamped knots
+                    let n_cp = cp_coords.len();
+                    let degree = 3u32.min(n_cp as u32 - 1);
+                    let n_knots = n_cp + degree as usize + 1;
+                    let mut knots = Vec::with_capacity(n_knots);
+                    // Clamped: first (degree+1) knots = 0, last (degree+1) = max
+                    for _ in 0..=degree as usize { knots.push(0.0); }
+                    let internal = n_cp - degree as usize - 1;
+                    for i in 1..internal { knots.push(i as f64); }
+                    for _ in 0..=degree as usize { knots.push(internal.max(1) as f64); }
+                    param_loops.push(vec![ParamCurve::BSpline {
+                        control_points: cp_coords,
+                        knots,
+                        degree,
+                    }]);
+                } else if cp_coords.len() >= 2 {
+                    // Degenerate: fall back to line segments
+                    for w in cp_ids.windows(2) {
+                        edges.push(EdgeRef { entity_id: id, a: w[0], b: w[1], kind: EdgeKind::Line });
+                    }
                 }
             }
             _ => {}
@@ -1454,6 +1493,8 @@ fn curve_start(c: &ParamCurve) -> (f64, f64) {
             (center.0 + ex * angle.cos() - ey * angle.sin(),
              center.1 + ex * angle.sin() + ey * angle.cos())
         }
+        ParamCurve::Bezier { p0, .. } => *p0,
+        ParamCurve::BSpline { control_points, .. } => *control_points.first().unwrap_or(&(0.0, 0.0)),
     }
 }
 
@@ -1473,6 +1514,8 @@ fn curve_end(c: &ParamCurve) -> (f64, f64) {
             (center.0 + ex * angle.cos() - ey * angle.sin(),
              center.1 + ex * angle.sin() + ey * angle.cos())
         }
+        ParamCurve::Bezier { p3, .. } => *p3,
+        ParamCurve::BSpline { control_points, .. } => *control_points.last().unwrap_or(&(0.0, 0.0)),
     }
 }
 
@@ -1942,11 +1985,10 @@ mod tests {
                 cap_area += 0.5 * ((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)).abs();
             }
         }
-        // TODO: The bridge-edge method with 2+ holes currently over-counts cap area
-        // for some configurations. The geometry is correct (holes are punched) but
-        // some triangulation overlap inflates the area. Relax tolerance for now.
-        assert!(cap_area > expected_cap * 0.8 && cap_area < expected_cap * 2.0,
-            "cap area {:.3} wildly off from expected {:.3}", cap_area, expected_cap);
+        // The bridge-edge method with farthest-first hole ordering should now
+        // produce correct triangulation without overlapping bridges.
+        assert!((cap_area - expected_cap).abs() < expected_cap * 0.02,
+            "cap area {:.3} != expected {:.3}", cap_area, expected_cap);
     }
 
     #[test]

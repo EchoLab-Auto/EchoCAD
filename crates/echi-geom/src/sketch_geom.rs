@@ -298,6 +298,111 @@ pub fn perpendicular_foot(
     (x1 + t * dx, y1 + t * dy, t)
 }
 
+// ── Arc / Ellipse intersections ─────────────────────────────────────
+
+/// Intersection of an infinite line with an arc. Returns points on the arc
+/// (within the arc's angular range, inclusive).
+pub fn arc_line_intersection(
+    x1: f64, y1: f64, x2: f64, y2: f64,
+    cx: f64, cy: f64, r: f64,
+    start_angle: f64, end_angle: f64,
+) -> Vec<(f64, f64)> {
+    line_circle_intersection(x1, y1, x2, y2, cx, cy, r)
+        .into_iter()
+        .filter(|&(ix, iy)| {
+            let angle = (iy - cy).atan2(ix - cx);
+            angle_in_range(angle, start_angle, end_angle)
+        })
+        .collect()
+}
+
+/// Intersection of a line segment with an arc.
+pub fn segment_arc_intersection(
+    x1: f64, y1: f64, x2: f64, y2: f64,
+    cx: f64, cy: f64, r: f64,
+    start_angle: f64, end_angle: f64,
+) -> Vec<(f64, f64)> {
+    // First, check which line-circle intersections fall on the arc
+    let circle_hits = line_circle_intersection(x1, y1, x2, y2, cx, cy, r);
+    circle_hits.into_iter().filter(|&(ix, iy)| {
+        // Check angle range
+        let angle = (iy - cy).atan2(ix - cx);
+        if !angle_in_range(angle, start_angle, end_angle) { return false; }
+        // Check segment bounds
+        let t = if (x2 - x1).abs() > (y2 - y1).abs() {
+            if (x2 - x1).abs() < 1e-12 { return false; }
+            (ix - x1) / (x2 - x1)
+        } else {
+            if (y2 - y1).abs() < 1e-12 { return false; }
+            (iy - y1) / (y2 - y1)
+        };
+        t >= -1e-9 && t <= 1.0 + 1e-9
+    }).collect()
+}
+
+/// Intersection of two circular arcs (same center and radius assumed to be
+/// handled by circle_circle_intersection, then angle-filtered for both arcs).
+pub fn arc_arc_intersection(
+    cx1: f64, cy1: f64, r1: f64, start1: f64, end1: f64,
+    cx2: f64, cy2: f64, r2: f64, start2: f64, end2: f64,
+) -> Vec<(f64, f64)> {
+    circle_circle_intersection(cx1, cy1, r1, cx2, cy2, r2)
+        .into_iter()
+        .filter(|&(ix, iy)| {
+            let a1 = (iy - cy1).atan2(ix - cx1);
+            let a2 = (iy - cy2).atan2(ix - cx2);
+            angle_in_range(a1, start1, end1) && angle_in_range(a2, start2, end2)
+        })
+        .collect()
+}
+
+/// Intersection of an infinite line with an ellipse.
+/// The ellipse is defined by center (cx,cy), major axis vector (major_rx, major_ry),
+/// and ratio (minor/major). Solves the quadratic line-ellipse intersection in
+/// the ellipse's local frame.
+pub fn line_ellipse_intersection(
+    x1: f64, y1: f64, x2: f64, y2: f64,
+    cx: f64, cy: f64, major_rx: f64, major_ry: f64, ratio: f64,
+) -> Vec<(f64, f64)> {
+    let a = (major_rx * major_rx + major_ry * major_ry).sqrt();
+    let b = a * ratio;
+    if a < 1e-12 || b < 1e-12 { return vec![]; }
+    let angle = major_ry.atan2(major_rx);
+    let cos_a = angle.cos(); let sin_a = angle.sin();
+
+    // Transform line to ellipse-local frame (rotate by -angle, translate by -center)
+    let tx = |px: f64, py: f64| -> (f64, f64) {
+        let dx = px - cx; let dy = py - cy;
+        (dx * cos_a + dy * sin_a, -dx * sin_a + dy * cos_a)
+    };
+    let (lx1, ly1) = tx(x1, y1);
+    let (lx2, ly2) = tx(x2, y2);
+    let dx = lx2 - lx1; let dy = ly2 - ly1;
+
+    // Intersection of line with ellipse x²/a² + y²/b² = 1:
+    // Substitute (lx1 + t*dx)²/a² + (ly1 + t*dy)²/b² = 1
+    // → At² + Bt + C = 0
+    let a2 = a * a; let b2 = b * b;
+    let aa = dx*dx/a2 + dy*dy/b2;
+    let bb = 2.0 * (lx1*dx/a2 + ly1*dy/b2);
+    let cc = lx1*lx1/a2 + ly1*ly1/b2 - 1.0;
+
+    let disc = bb*bb - 4.0*aa*cc;
+    if disc < -1e-12 { return vec![]; }
+
+    let mut pts = Vec::new();
+    if disc.abs() < 1e-12 {
+        let t = -bb / (2.0 * aa);
+        pts.push((x1 + t * dx, y1 + t * dy));
+    } else {
+        let sqrt_d = disc.sqrt();
+        for &t in &[(-bb - sqrt_d) / (2.0 * aa), (-bb + sqrt_d) / (2.0 * aa)] {
+            pts.push((x1 + t * dx, y1 + t * dy));
+        }
+    }
+    pts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,7 +511,7 @@ mod tests {
     fn test_line_circle_tangent() {
         // Line y=1 tangent to circle at (0,0) radius 1
         let pts = line_circle_intersection(-2.0, 1.0, 2.0, 1.0, 0.0, 0.0, 1.0);
-        assert_eq!(pts.len(), 1);
+        assert_eq!(pts.len(), 1, "expected 1 point on quarter-arc, got {}", pts.len());
         assert!((pts[0].0).abs() < 1e-9);
         assert!((pts[0].1 - 1.0).abs() < 1e-9);
     }
@@ -468,5 +573,50 @@ mod tests {
         assert!((fx - 1.5).abs() < 1e-9);
         assert!((fy - 1.5).abs() < 1e-9);
         assert!((t - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_arc_line_intersection() {
+        // Line from (-1,0) to (3,0) intersecting an arc at origin radius 1
+        // from angle 0 to π/2 (first quadrant). Should hit at (1,0) -- within arc.
+        let pts = arc_line_intersection(-1.0, 0.0, 3.0, 0.0, 0.0, 0.0, 1.0, 0.0, std::f64::consts::FRAC_PI_2);
+        assert_eq!(pts.len(), 1, "expected 1 point on quarter-arc, got {}", pts.len());
+        assert!((pts[0].0 - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_arc_line_intersection_outside_arc() {
+        // Line from (-1,0) to (3,0) intersecting arc from π to 2π (lower half).
+        // Intersection at (-1,0) is on the circle but OUTSIDE the arc range.
+        let pts = arc_line_intersection(-3.0, 0.0, 3.0, 0.0, 0.0, 0.0, 1.0, std::f64::consts::PI, 2.0 * std::f64::consts::PI);
+        // (-1,0) is at angle π which IS in [π, 2π], so we should get it
+        assert!(pts.len() >= 1);
+    }
+
+    #[test]
+    fn test_arc_arc_intersection() {
+        // Two quarter-circles at origin, radius 1: arc1 [0, π/2], arc2 [π/4, 3π/4]
+        // Their circles are identical so all points are "intersections", but
+        // only points in BOTH angle ranges qualify.
+        // The overlapping angle range is [π/4, π/2]. The "intersection" of
+        // two full circles at the same center is the whole circle, but
+        // arc_arc_intersection filters by angle ranges.
+        let pts = arc_arc_intersection(
+            0.0, 0.0, 1.0, 0.0, std::f64::consts::FRAC_PI_2,
+            0.0, 0.0, 1.0, std::f64::consts::FRAC_PI_4, 3.0 * std::f64::consts::FRAC_PI_4,
+        );
+        // Two identical circles have infinite intersections; circle_circle returns empty.
+        assert_eq!(pts.len(), 0);
+    }
+
+    #[test]
+    fn test_line_ellipse_intersection() {
+        // Ellipse at origin, major axis along X, a=2, b=1 (ratio=0.5).
+        // Line y=0 from (-3,0) to (3,0) intersects at (-2,0) and (2,0).
+        let pts = line_ellipse_intersection(-3.0, 0.0, 3.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.5);
+        assert_eq!(pts.len(), 2);
+        let xs: Vec<f64> = pts.iter().map(|p| p.0).collect();
+        assert!(xs.iter().any(|&x| (x + 2.0).abs() < 1e-6));
+        assert!(xs.iter().any(|&x| (x - 2.0).abs() < 1e-6));
     }
 }

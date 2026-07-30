@@ -351,8 +351,15 @@ fn bevel_edge(builder: &mut MeshBuilder, edge: &SharpEdge, amount: f32, kind: Be
         builder.new_triangles.push([m0, m1, m2]);
         builder.new_triangles.push([m1, m3, m2]);
     } else {
-        // Fillet: insert an arc strip with N segments.
-        let n_segments = 4;
+        // Fillet: insert an arc strip with adaptive segment count based on
+        // chord error. For small radii or shallow angles, use fewer segments;
+        // for large radii or sharp corners, use more.
+        let dot = (edge.n_a[0] * edge.n_b[0] + edge.n_a[1] * edge.n_b[1] + edge.n_a[2] * edge.n_b[2]).clamp(-1.0, 1.0);
+        let span = dot.acos(); // angular span between the two face normals
+        let chord_error = 0.005f32; // match extrude default
+        let radius = amount.max(1e-6);
+        let delta_angle = 2.0 * (1.0 - chord_error / radius).clamp(0.0, 1.0).acos();
+        let n_segments = if delta_angle > 1e-6 { ((span / delta_angle).ceil() as usize).max(2) } else { 2 };
         let mut prev_a = i_p0a;
         let mut prev_b = i_p1a;
         for i in 1..n_segments {

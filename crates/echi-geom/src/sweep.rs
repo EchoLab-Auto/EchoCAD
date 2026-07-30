@@ -2,6 +2,7 @@
 
 use echi_core::sketch::Sketch;
 use crate::extrude::{Mesh, Point2D};
+use crate::param_curve::{ParamCurve, ParamLoop, sample_loop, loop_signed_area};
 
 /// Sweep a profile sketch along a path sketch.
 ///
@@ -10,12 +11,41 @@ use crate::extrude::{Mesh, Point2D};
 /// triangle strips; open paths get ear-clipped end caps, closed paths are
 /// stitched into a seamless torus-like surface.
 pub fn sweep_mesh(profile_sketch: &Sketch, path_sketch: &Sketch) -> Option<Mesh> {
-    let (path, path_closed) = extract_path(path_sketch)?;
-    if path.len() < 2 {
-        return None;
+    let (path_loop, path_closed) = extract_path(path_sketch)?;
+    // Sample path adaptively, then subdivide segments with high curvature.
+    let mut path: Vec<(f64, f64)> = sample_loop(&path_loop, 0.005);
+    if path.len() < 2 { return None; }
+    // Curvature-based resampling: collect midpoints for segments with high
+    // angular deviation, then insert in reverse order to keep indices stable.
+    let angle_threshold = 5.0f64.to_radians();
+    let n = path.len();
+    let mut insertions: Vec<(usize, (f64, f64))> = Vec::new();
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let k = (i + 2) % n;
+        let dx1 = path[j].0 - path[i].0; let dy1 = path[j].1 - path[i].1;
+        let dx2 = path[k].0 - path[j].0; let dy2 = path[k].1 - path[j].1;
+        let len1 = (dx1*dx1 + dy1*dy1).sqrt(); let len2 = (dx2*dx2 + dy2*dy2).sqrt();
+        if len1 > 1e-6 && len2 > 1e-6 {
+            let dot = (dx1*dx2 + dy1*dy2) / (len1 * len2);
+            let angle = dot.clamp(-1.0, 1.0).acos();
+            if angle > angle_threshold {
+                let mx = (path[j].0 + path[i].0) / 2.0;
+                let my = (path[j].1 + path[i].1) / 2.0;
+                let idx = if i < j { j } else { 0 };
+                insertions.push((idx, (mx, my)));
+            }
+        }
     }
+    // Insert in reverse order so earlier indices stay valid
+    insertions.sort_by(|a, b| b.0.cmp(&a.0));
+    for (idx, pt) in insertions {
+        if idx <= path.len() { path.insert(idx, pt); }
+    }
+    if path.len() < 2 { return None; }
 
-    let profile = extract_closed_profile(profile_sketch)?;
+    let profile_loop = extract_closed_profile(profile_sketch)?;
+    let profile: Vec<(f64, f64)> = sample_loop(&profile_loop, 0.005);
     if profile.len() < 3 {
         return None;
     }
@@ -301,23 +331,16 @@ fn compute_frenet_frames(
 /// all work (a circular path yields a closed loop — torus-like sweeps).
 /// Falls back to a raw line-chain walk for degenerate 2-point paths that
 /// the loop extractor drops (a polygon needs ≥3 points to count as a loop).
-fn extract_path(sketch: &Sketch) -> Option<(Vec<(f64, f64)>, bool)> {
-    if let Some(loops) = crate::extrude::extract_loops(sketch) {
-        // The path is the chain with the most points.
-        let mut best: Option<(Vec<(f64, f64)>, bool)> = None;
-        for lp in loops {
-            let mut pts: Vec<(f64, f64)> = lp.iter().map(|p| (p.x, p.y)).collect();
-            let mut closed = false;
-            if pts.len() >= 2 {
-                let f = pts[0];
-                let l = pts[pts.len() - 1];
-                if ((f.0 - l.0).powi(2) + (f.1 - l.1).powi(2)).sqrt() < 1e-9 {
-                    pts.pop();
-                    closed = true;
-                }
-            }
-            if pts.len() >= 2 && best.as_ref().map_or(true, |(b, _)| pts.len() > b.len()) {
-                best = Some((pts, closed));
+fn extract_path(sketch: &Sketch) -> Option<(ParamLoop, bool)> {
+    if let Some(param_loops) = crate::extrude::extract_param_loops(sketch) {
+        // The path is the loop with the most curves (longest chain).
+        let mut best: Option<(ParamLoop, bool)> = None;
+        let mut best_len = 0usize;
+        for pl in param_loops {
+            let n_curves = pl.len();
+            if n_curves >= 1 && n_curves > best_len {
+                best_len = n_curves;
+                best = Some((pl, true)); // parametric loops are always closed
             }
         }
         if let Some(b) = best {
@@ -379,37 +402,27 @@ fn extract_path(sketch: &Sketch) -> Option<(Vec<(f64, f64)>, bool)> {
         }
     }
     if points.len() >= 2 {
-        Some((points, false))
+        // Wrap the raw line-chain as a parametric loop
+        let curves: ParamLoop = points.windows(2)
+            .map(|w| crate::param_curve::ParamCurve::Line { start: w[0], end: w[1] })
+            .collect();
+        Some((curves, false))
     } else {
         None
     }
 }
 
-/// Extract a closed 2D profile from sketch entities. Uses the shared loop
-/// extractor (arcs/circles/splines supported); takes the largest-area loop.
-fn extract_closed_profile(sketch: &Sketch) -> Option<Vec<(f64, f64)>> {
-    let loops = crate::extrude::extract_loops(sketch)?;
-    let mut best: Option<Vec<(f64, f64)>> = None;
+/// Extract a closed 2D profile from sketch entities. Uses the parametric
+/// loop extractor (arcs/circles/splines supported); takes the largest-area loop.
+fn extract_closed_profile(sketch: &Sketch) -> Option<ParamLoop> {
+    let param_loops = crate::extrude::extract_param_loops(sketch)?;
+    let mut best: Option<ParamLoop> = None;
     let mut best_area = 0.0f64;
-    for lp in loops {
-        let mut area = 0.0;
-        let n = lp.len();
-        for i in 0..n {
-            let j = (i + 1) % n;
-            area += lp[i].x * lp[j].y - lp[j].x * lp[i].y;
-        }
-        let area = area.abs() / 2.0;
+    for pl in param_loops {
+        let area = loop_signed_area(&pl).abs();
         if area > best_area {
             best_area = area;
-            let mut pts: Vec<(f64, f64)> = lp.iter().map(|p| (p.x, p.y)).collect();
-            if pts.len() >= 2 {
-                let f = pts[0];
-                let l = pts[pts.len() - 1];
-                if ((f.0 - l.0).powi(2) + (f.1 - l.1).powi(2)).sqrt() < 1e-9 {
-                    pts.pop();
-                }
-            }
-            best = Some(pts);
+            best = Some(pl);
         }
     }
     best
