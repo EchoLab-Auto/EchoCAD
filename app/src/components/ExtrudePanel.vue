@@ -198,4 +198,5 @@ defineExpose({ resetLoading });
 }
 .btn-cancel:hover { background: #505050; }
 .btn-cancel:disabled { opacity: 0.5; cursor: not-allowed; }
+.region-count { font-size: 10px; color: var(--fg-faint); font-weight: 400; }
 </style>

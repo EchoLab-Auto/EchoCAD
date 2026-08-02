@@ -81,6 +81,11 @@ pub struct AppState {
     /// check this flag and regenerate lazily, so sketch edits propagate to
     /// dependent solids exactly once — never per mousemove during drags.
     pub regen_dirty: AtomicBool,
+    /// Native wgpu renderer bridge (P1). `None` in legacy mode. Mesh data is
+    /// staged here after every regen — it never crosses IPC to the frontend.
+    pub render_manager: Option<std::sync::Arc<echi_wgpu::RenderManager>>,
+    /// App handle for emitting `viewport_updated` events after regen (wgpu mode).
+    pub(crate) app_handle: std::sync::Mutex<Option<tauri::AppHandle>>,
     /// Meshes imported from external formats (STEP). They are not backed by
     /// document features, so the regen pipeline would drop them — every
     /// regen helper re-injects them into the fresh result afterwards.
@@ -89,6 +94,19 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> Self {
+        Self::new_with_render_manager(None)
+    }
+
+    /// Create the state with the native renderer bridge.
+    pub fn new_with_render_manager(
+        render_manager: Option<std::sync::Arc<echi_wgpu::RenderManager>>,
+    ) -> Self {
+        let mut state = Self::new_inner();
+        state.render_manager = render_manager;
+        state
+    }
+
+    fn new_inner() -> Self {
         let mut doc = Document::new("Part1");
         let sketch_id = doc.new_feature_id();
         doc.add_feature(Feature::new(
@@ -114,6 +132,8 @@ impl AppState {
             use_brep: AtomicBool::new(true),
             regen_dirty: AtomicBool::new(false),
             imported_meshes: Mutex::new(HashMap::new()),
+            render_manager: None,
+            app_handle: std::sync::Mutex::new(None),
         }
     }
 
@@ -327,6 +347,177 @@ fn reinject_imported(result: &mut RegenResult, state: &AppState) {
     }
 }
 
+/// Stage the active sketch's linework (polyline-ized) into the renderer.
+/// Called after every sketch mutation command.
+fn sync_sketch(state: &AppState) {
+    let Some(manager) = &state.render_manager else { return };
+    let doc = state.lock_doc();
+    let active = *state.lock_sketch();
+    let positions = sketch_linework(&doc, active);
+    manager.sync_sketch(positions);
+}
+
+/// Convert the active sketch's entities into world-space line segments
+/// (LineList positions). Points are skipped; curves are polyline-ized.
+fn sketch_linework(doc: &Document, active_sketch: Option<FeatureId>) -> Vec<f32> {
+    use echi_core::sketch::{SketchEntity};
+    use std::f64::consts::TAU;
+
+    let mut out: Vec<f32> = Vec::new();
+    let Some(sid) = active_sketch else { return out };
+    let Some(feature) = doc.get_feature(sid) else { return out };
+    let (sketch, plane) = match &feature.kind {
+        echi_core::feature::FeatureKind::Sketch { sketch, plane }
+        | echi_core::feature::FeatureKind::CustomSketch { sketch, plane, .. } => (sketch, plane),
+        _ => return out,
+    };
+    let (origin, u, v, _n) = plane.frame();
+    let to_world = |p: (f64, f64)| -> [f32; 3] {
+        [
+            (origin[0] + p.0 * u[0] + p.1 * v[0]) as f32,
+            (origin[1] + p.0 * u[1] + p.1 * v[1]) as f32,
+            (origin[2] + p.0 * u[2] + p.1 * v[2]) as f32,
+        ]
+    };
+    let pos = |id: echi_core::sketch::EntityId| -> Option<(f64, f64)> {
+        match sketch.entities.get(&id) {
+            Some(SketchEntity::Point(p)) => Some((p.x, p.y)),
+            _ => None,
+        }
+    };
+
+    fn seg(out: &mut Vec<f32>, to_world: &dyn Fn((f64, f64)) -> [f32; 3], a: (f64, f64), b: (f64, f64)) {
+        out.extend_from_slice(&to_world(a));
+        out.extend_from_slice(&to_world(b));
+    }
+    fn polyline(out: &mut Vec<f32>, to_world: &dyn Fn((f64, f64)) -> [f32; 3], pts: &[(f64, f64)]) {
+        for w in pts.windows(2) {
+            seg(out, to_world, w[0], w[1]);
+        }
+    }
+    fn arc_points(out: &mut Vec<f32>, to_world: &dyn Fn((f64, f64)) -> [f32; 3], center: (f64, f64), radius: f64, a0: f64, a1: f64, n: usize) {
+        let mut pts = Vec::with_capacity(n + 1);
+        for i in 0..=n {
+            let t = a0 + (a1 - a0) * (i as f64 / n as f64);
+            pts.push((center.0 + radius * t.cos(), center.1 + radius * t.sin()));
+        }
+        polyline(out, to_world, &pts);
+    }
+    let to_world_ref: &dyn Fn((f64, f64)) -> [f32; 3] = &to_world;
+
+    for (_, ent) in &sketch.entities {
+        match ent {
+            SketchEntity::Line { start, end, .. } => {
+                if let (Some(a), Some(b)) = (pos(*start), pos(*end)) {
+                    seg(&mut out, to_world_ref, a, b);
+                }
+            }
+            SketchEntity::Circle { center, radius, .. } => {
+                if let Some(c) = pos(*center) {
+                    arc_points(&mut out, to_world_ref, c, *radius, 0.0, TAU, 64);
+                }
+            }
+            SketchEntity::Arc {
+                center,
+                radius,
+                start_angle,
+                end_angle,
+                ..
+            } => {
+                if let Some(c) = pos(*center) {
+                    arc_points(&mut out, to_world_ref, c, *radius, *start_angle, *end_angle, 64);
+                }
+            }
+            SketchEntity::Spline {
+                control_points, ..
+            } => {
+                let pts: Vec<(f64, f64)> = control_points
+                    .iter()
+                    .filter_map(|id| pos(*id))
+                    .collect();
+                if pts.len() >= 2 {
+                    polyline(&mut out, to_world_ref, &pts);
+                }
+            }
+            SketchEntity::Ellipse {
+                center,
+                major_axis_end,
+                ratio,
+                ..
+            } => {
+                if let (Some(c), Some(m)) = (pos(*center), pos(*major_axis_end)) {
+                    let (dx, dy) = (m.0 - c.0, m.1 - c.1);
+                    let major = dx.hypot(dy).max(1e-9);
+                    let ang = dy.atan2(dx);
+                    let minor = major * *ratio;
+                    let mut pts = Vec::with_capacity(65);
+                    for i in 0..=64 {
+                        let t = TAU * (i as f64 / 64.0);
+                        pts.push((
+                            c.0 + major * t.cos() * ang.cos() - minor * t.sin() * ang.sin(),
+                            c.1 + major * t.cos() * ang.sin() + minor * t.sin() * ang.cos(),
+                        ));
+                    }
+                    polyline(&mut out, to_world_ref, &pts);
+                }
+            }
+            SketchEntity::Point(_) => {}
+        }
+    }
+    out
+}
+
+/// Stage the fresh regen result into the native renderer (wgpu mode) and
+/// notify the frontend with the new revision. Mesh bytes never cross IPC.
+fn sync_renderer(state: &AppState, full_regen: bool, changed_ids: &[FeatureId]) {
+    let Some(manager) = &state.render_manager else { return };
+    log::debug!("sync_renderer: full={full_regen} solids={}", state.lock_regen().solids.len());
+    if full_regen {
+        let solids = state.lock_regen().solids.clone();
+        let mut scene = std::collections::HashMap::new();
+        for (id, mesh) in solids {
+            scene.insert(
+                id.0 as u32,
+                echi_wgpu::SceneMesh {
+                    positions: mesh.positions.clone(),
+                    normals: mesh.normals.clone(),
+                    indices: mesh.indices.clone(),
+                    label: String::new(),
+                    suppressed: false,
+                    error: None,
+                },
+            );
+        }
+        manager.sync_from_regen(&scene, true);
+    } else {
+        manager.mark_dirty(changed_ids.iter().map(|id| id.0 as u32));
+        let solids = state.lock_regen().solids.clone();
+        let mut scene = std::collections::HashMap::new();
+        for (id, mesh) in solids {
+            scene.insert(
+                id.0 as u32,
+                echi_wgpu::SceneMesh {
+                    positions: mesh.positions.clone(),
+                    normals: mesh.normals.clone(),
+                    indices: mesh.indices.clone(),
+                    label: String::new(),
+                    suppressed: false,
+                    error: None,
+                },
+            );
+        }
+        manager.sync_from_regen(&scene, false);
+    }
+    // Notify the frontend (panel UIs refresh their state from the revision).
+    if let Some(handle) = state.app_handle.lock().unwrap().as_ref() {
+        use tauri::Emitter;
+        let _ = handle.emit(
+            "viewport_updated",
+            serde_json::json!({ "rev": manager.revision() }),
+        );
+    }
+}
+
 fn regenerate_state(state: &AppState) {
     let doc = state.lock_doc();
     let solid_gen: &dyn SolidGenerator = &PluginSolidGen(&state.plugin_registry);
@@ -336,6 +527,7 @@ fn regenerate_state(state: &AppState) {
     *state.lock_regen() = result;
     // We just regenerated everything — any pending dirty flag is satisfied.
     state.regen_dirty.store(false, Ordering::SeqCst);
+    sync_renderer(state, true, &[]);
 }
 
 /// Full regeneration from an already-locked document reference.
@@ -346,6 +538,7 @@ fn regen_locked(doc: &Document, state: &AppState) {
     reinject_imported(&mut result, state);
     *state.lock_regen() = result;
     state.regen_dirty.store(false, Ordering::SeqCst);
+    sync_renderer(state, true, &[]);
 }
 
 /// Incremental regeneration: only re-evaluate the changed feature and its
@@ -363,6 +556,7 @@ fn incremental_regen_locked(doc: &Document, state: &AppState, changed_id: Featur
     // regen only covers one feature's dirty set, while the flag may also
     // reflect sketch mutations whose dependents weren't re-evaluated. The
     // next mesh read (regen_if_dirty) will do the full regen if needed.
+    sync_renderer(state, false, &[changed_id]);
 }
 
 // ── Feature node projection ─────────────────────────────────────
@@ -626,14 +820,23 @@ pub fn add_sketch_feature(plane: String, state: tauri::State<AppState>) -> Featu
 
 #[tauri::command]
 pub fn set_active_sketch(id: FeatureId, state: tauri::State<AppState>) {
+    set_active_sketch_inner(id, state.inner());
+}
+
+fn set_active_sketch_inner(id: FeatureId, state: &AppState) {
     // Note: no snapshot. Switching the active sketch is a UI state change,
     // not a document mutation — it should not pollute the undo history.
-    let doc = state.lock_doc();
-    if let Some(f) = doc.get_feature(id) {
-        if f.is_sketch() {
-            *state.lock_sketch() = Some(id);
+    {
+        let doc = state.lock_doc();
+        if let Some(f) = doc.get_feature(id) {
+            if f.is_sketch() {
+                *state.lock_sketch() = Some(id);
+            }
         }
-    }
+    } // doc guard dropped BEFORE sync_sketch — sync_sketch locks the
+      // document itself, and std::sync::Mutex is non-reentrant, so calling
+      // it with the guard held deadlocks the command thread.
+    sync_sketch(state);
 }
 
 #[tauri::command]
@@ -1054,12 +1257,16 @@ pub fn remove_constraint(index: usize, state: tauri::State<AppState>) -> bool {
 #[tauri::command]
 pub fn add_point(x: f64, y: f64, state: tauri::State<AppState>) -> Option<EntityId> {
     state.snapshot_if_sketch();
-    state.with_active_sketch_mut(|s| s.add_point(x, y))
+    let __result = state.with_active_sketch_mut(|s| s.add_point(x, y));
+    sync_sketch(state.inner());
+    __result
 }
 #[tauri::command]
 pub fn add_line(start: EntityId, end: EntityId, state: tauri::State<AppState>) -> Option<EntityId> {
     state.snapshot_if_sketch();
-    state.with_active_sketch_mut(|s| s.add_line(start, end))
+    let __result = state.with_active_sketch_mut(|s| s.add_line(start, end));
+    sync_sketch(state.inner());
+    __result
 }
 #[tauri::command]
 pub fn add_circle(center: EntityId, radius: f64, state: tauri::State<AppState>) -> Option<EntityId> {
@@ -1207,7 +1414,9 @@ pub fn update_entity_prop(id: EntityId, prop: String, value: f64, state: tauri::
 /// point would leave the circle stranded at (0,0).
 pub fn delete_entity(id: EntityId, state: tauri::State<AppState>) -> bool {
     state.snapshot_if_sketch();
-    state.with_active_sketch_mut(|s| !s.delete_entity_cascade(id).is_empty()).unwrap_or(false)
+    let __result = state.with_active_sketch_mut(|s| !s.delete_entity_cascade(id).is_empty()).unwrap_or(false);
+    sync_sketch(state.inner());
+    __result
 }
 
 /// Delete an entity WITHOUT an undo snapshot. Used by the draw-cancel
@@ -1502,6 +1711,7 @@ pub fn clear_sketch(state: tauri::State<AppState>) {
     state.snapshot_if_sketch();
     state.with_active_sketch_mut(|s| *s = Sketch::new());
     regenerate_state(&state);
+    sync_sketch(state.inner());
 }
 
 // ── Solid mesh queries ───────────────────────────────────────────
@@ -2103,54 +2313,77 @@ pub fn generate_plugin_feature(
 
 #[tauri::command]
 pub fn undo(state: tauri::State<AppState>) -> Result<bool, String> {
-    let mut doc = state.lock_doc();
-    let active = *state.lock_sketch();
-    let mut mgr = state.lock_undo();
-    if !mgr.can_undo() {
-        return Ok(false);
-    }
-    if let Some((restored, ra)) = mgr.undo(&doc, active) {
-        *doc = restored;
-        // Clear imported meshes: undo restores a snapshot whose id space may be
-        // unrelated to the current document's. Stale entries alias onto new features
-        // (phantom geometry, §16).
-        if let Ok(mut imported) = state.imported_meshes.lock() {
-            imported.clear();
+    undo_inner(state.inner())
+}
+
+fn undo_inner(state: &AppState) -> Result<bool, String> {
+    // All guards (doc + undo manager) are scoped to this block: sync_sketch
+    // re-locks the document, and std::sync::Mutex is non-reentrant, so it
+    // must run only after every guard is dropped.
+    let did_undo = {
+        let mut doc = state.lock_doc();
+        let active = *state.lock_sketch();
+        let mut mgr = state.lock_undo();
+        if !mgr.can_undo() {
+            false
+        } else if let Some((restored, ra)) = mgr.undo(&doc, active) {
+            *doc = restored;
+            // Clear imported meshes: undo restores a snapshot whose id space may be
+            // unrelated to the current document's. Stale entries alias onto new features
+            // (phantom geometry, §16).
+            if let Ok(mut imported) = state.imported_meshes.lock() {
+                imported.clear();
+            }
+            let valid = ra
+                .filter(|&id| doc.get_feature(id).map(|f| f.is_sketch()).unwrap_or(false))
+                .or_else(|| doc.features.iter().find_map(|f| if f.is_sketch() { Some(f.id()) } else { None }));
+            *state.lock_sketch() = valid;
+            regen_locked(&doc, state);
+            true
+        } else {
+            false
         }
-        let valid = ra
-            .filter(|&id| doc.get_feature(id).map(|f| f.is_sketch()).unwrap_or(false))
-            .or_else(|| doc.features.iter().find_map(|f| if f.is_sketch() { Some(f.id()) } else { None }));
-        *state.lock_sketch() = valid;
-        regen_locked(&doc, &state);
-        Ok(true)
-    } else {
-        Ok(false)
+    };
+    if did_undo {
+        sync_sketch(state);
     }
+    Ok(did_undo)
 }
 
 #[tauri::command]
 pub fn redo(state: tauri::State<AppState>) -> Result<bool, String> {
-    let mut doc = state.lock_doc();
-    let active = *state.lock_sketch();
-    let mut mgr = state.lock_undo();
-    if !mgr.can_redo() {
-        return Ok(false);
-    }
-    if let Some((restored, ra)) = mgr.redo(&doc, active) {
-        *doc = restored;
-        // Clear imported meshes (same reasoning as undo, §16).
-        if let Ok(mut imported) = state.imported_meshes.lock() {
-            imported.clear();
+    redo_inner(state.inner())
+}
+
+fn redo_inner(state: &AppState) -> Result<bool, String> {
+    // Same guard-scoping as undo: sync_sketch re-locks the document and
+    // must run only after doc + undo guards are dropped.
+    let did_redo = {
+        let mut doc = state.lock_doc();
+        let active = *state.lock_sketch();
+        let mut mgr = state.lock_undo();
+        if !mgr.can_redo() {
+            false
+        } else if let Some((restored, ra)) = mgr.redo(&doc, active) {
+            *doc = restored;
+            // Clear imported meshes (same reasoning as undo, §16).
+            if let Ok(mut imported) = state.imported_meshes.lock() {
+                imported.clear();
+            }
+            let valid = ra
+                .filter(|&id| doc.get_feature(id).map(|f| f.is_sketch()).unwrap_or(false))
+                .or_else(|| doc.features.iter().find_map(|f| if f.is_sketch() { Some(f.id()) } else { None }));
+            *state.lock_sketch() = valid;
+            regen_locked(&doc, state);
+            true
+        } else {
+            false
         }
-        let valid = ra
-            .filter(|&id| doc.get_feature(id).map(|f| f.is_sketch()).unwrap_or(false))
-            .or_else(|| doc.features.iter().find_map(|f| if f.is_sketch() { Some(f.id()) } else { None }));
-        *state.lock_sketch() = valid;
-        regen_locked(&doc, &state);
-        Ok(true)
-    } else {
-        Ok(false)
+    };
+    if did_redo {
+        sync_sketch(state);
     }
+    Ok(did_redo)
 }
 
 #[tauri::command]
@@ -2535,5 +2768,71 @@ mod tests {
         let state = make_state();
         assert!(state.autosave_enabled.load(std::sync::atomic::Ordering::Relaxed));
         assert!(!state.has_recovery_file.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    // ── Deadlock regression: non-reentrant document mutex ──────
+    //
+    // `sync_sketch` early-returns when there is no render manager, which is
+    // why unit tests never caught it: in production the manager is always
+    // Some, and any command that called sync_sketch while still holding the
+    // document guard re-locked the same std::sync::Mutex on the same thread
+    // → the whole app froze (observed: "create sketch" hang via
+    // set_active_sketch; undo had the same bug).
+    //
+    // These tests attach a real (GPU-less) RenderManager and run the
+    // commands on a worker thread: a deadlock blocks the thread forever,
+    // so the channel recv_timeout fires and fails the test with a clear
+    // message instead of hanging the suite.
+
+    /// Run `f` on a worker thread; panic if it doesn't finish in 5s.
+    fn run_with_deadlock_timeout<F>(name: &str, f: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            f();
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap_or_else(|_| {
+            panic!("{name} deadlocked — a command re-locked the document mutex while holding it")
+        });
+    }
+
+    fn make_render_state() -> AppState {
+        AppState::new_with_render_manager(Some(std::sync::Arc::new(
+            echi_wgpu::RenderManager::new(),
+        )))
+    }
+
+    #[test]
+    fn set_active_sketch_no_deadlock_with_render_manager() {
+        let state = std::sync::Arc::new(make_render_state());
+        let sketch_id = state.lock_doc().features[0].id();
+        let s = state.clone();
+        run_with_deadlock_timeout("set_active_sketch", move || {
+            set_active_sketch_inner(sketch_id, &s);
+        });
+        assert_eq!(*state.lock_sketch(), Some(sketch_id));
+    }
+
+    #[test]
+    fn undo_redo_no_deadlock_with_render_manager() {
+        let state = std::sync::Arc::new(make_render_state());
+        // Put a snapshot on the stack and mutate so undo has an effect.
+        state.snapshot();
+        state.lock_doc().features[0].set_name("Changed");
+
+        let s = state.clone();
+        run_with_deadlock_timeout("undo", move || {
+            undo_inner(&s).expect("undo should succeed");
+        });
+        assert_eq!(state.lock_doc().features[0].name(), "Sketch1");
+
+        let s = state.clone();
+        run_with_deadlock_timeout("redo", move || {
+            redo_inner(&s).expect("redo should succeed");
+        });
+        assert_eq!(state.lock_doc().features[0].name(), "Changed");
     }
 }

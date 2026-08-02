@@ -238,3 +238,281 @@ const planes = [
   { value: "zx", label: "ZX 平面" },
 ];
 </script>
+
+<style scoped>
+/*
+ * The toolbar has a FIXED total height (var(--toolbar-height)): the native
+ * renderer subtracts exactly this many logical pixels from the top of the
+ * window to place the 3D viewport. Rows must never wrap — row 2 scrolls
+ * horizontally instead when the window is narrow.
+ */
+.toolbar {
+  display: flex;
+  flex-direction: column;
+  height: var(--toolbar-height);
+  background: var(--bg-toolbar);
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+
+.tb-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: nowrap;
+  padding: 0 8px;
+  flex-shrink: 0;
+}
+.tb-row:first-child {
+  height: 34px;
+}
+.tb-row:last-child {
+  height: 41px;
+  overflow-x: auto;
+  scrollbar-width: none; /* keep the row height exact (Firefox) */
+}
+.tb-row:last-child::-webkit-scrollbar {
+  display: none; /* keep the row height exact (WebKit) */
+}
+
+.title {
+  font-weight: 700;
+  font-size: 13px;
+  margin-right: 8px;
+  flex-shrink: 0;
+}
+
+.tb-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--border-strong);
+  margin: 0 4px;
+  flex-shrink: 0;
+}
+.tb-spacer {
+  flex: 1;
+}
+
+/* ── Menus (文件 / 编辑 / 插件) ─────────────────────────────── */
+.tb-menu {
+  position: relative;
+  flex-shrink: 0;
+}
+.tb-menu-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  color: #ccc;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.tb-menu-btn:hover,
+.tb-menu-btn.open {
+  background: #444;
+  border-color: var(--border-strong);
+}
+.tb-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 2px;
+  background: var(--bg-menu);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  min-width: 150px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  z-index: 200;
+  padding: 4px;
+}
+.tb-dd-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  padding: 5px 12px;
+  font-size: 12px;
+  color: #ccc;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  border-radius: 2px;
+  text-align: left;
+  white-space: nowrap;
+}
+.tb-dd-item:hover {
+  background: var(--accent);
+  color: #fff;
+}
+.mm-key {
+  font-size: 10px;
+  color: #888;
+  margin-left: 12px;
+}
+.tb-dd-item:hover .mm-key {
+  color: #aac;
+}
+.mm-list button {
+  display: flex;
+  width: 100%;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: #ccc;
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  border-radius: 2px;
+  text-align: left;
+}
+.mm-list button:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+.recent-section {
+  border-top: 1px solid var(--border-strong);
+  margin-top: 4px;
+  padding-top: 4px;
+}
+.recent-header {
+  font-size: 10px;
+  color: #888;
+  padding: 4px 12px 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.recent-item {
+  font-size: 11px;
+}
+.recent-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+.recent-clear {
+  color: var(--fg-dim);
+  font-size: 10px;
+  font-style: italic;
+}
+.recent-clear:hover {
+  color: var(--danger-fg);
+  background: transparent;
+}
+
+/* ── Workspace tabs (实体 / 草图) ───────────────────────────── */
+.tb-ws-btn {
+  padding: 4px 14px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.tb-ws-btn:hover {
+  color: #ccc;
+  background: var(--bg-hover);
+}
+.tb-ws-btn.active {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ── Tool groups + buttons ──────────────────────────────────── */
+.tb-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  border: 1px solid #444;
+  border-radius: var(--radius);
+  padding: 2px 4px;
+}
+.tb-group-label {
+  font-size: 10px;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 0 3px;
+  flex-shrink: 0;
+}
+.tb-quick-btn {
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  color: #ddd;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 3px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.tb-quick-btn:hover {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.tb-quick-btn.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.tb-icon-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  color: #ccc;
+  padding: 3px 8px;
+  font-size: 14px;
+  cursor: pointer;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.tb-icon-btn:hover {
+  background: #444;
+}
+.tb-icon-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.tb-icon-btn:disabled:hover {
+  background: transparent;
+}
+.tb-exit-sketch {
+  background: #5a2a2a;
+  border: 1px solid #844;
+  color: var(--danger-fg);
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 3px;
+  white-space: nowrap;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.tb-exit-sketch:hover {
+  background: #733;
+  color: #ffaaaa;
+}
+
+.tb-plane {
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  color: #ccc;
+  padding: 3px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.tb-plane:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: #2a2a2a;
+}
+</style>

@@ -4,6 +4,7 @@ members = [
     "crates/echi-core",
     "crates/echi-geom",
     "crates/echi-render",
+    "crates/echi-wgpu",
     "crates/echi-io",
     "crates/echi-plugin",
     "crates/echi-plugin-gear",

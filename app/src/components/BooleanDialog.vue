@@ -74,8 +74,8 @@ function onConfirm() {
 </script>
 
 <style scoped>
-/* param-select / dialog-* classes are global (defined in HomeView); we only
-   add the small bits specific to the target rows here. */
+/* dialog-* / btn-* classes are global (style.css); only the target-row
+   bits specific to this dialog live here. */
 .boolean-target { align-items: center; }
 .target-name { flex: 1; font-size: 13px; color: #ccc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .swap-btn {

@@ -5,6 +5,7 @@
 
 mod commands;
 mod step_io;
+mod wgpu_viewport;
 
 use commands::{
     add_arc, add_circle, add_constraint, add_extrude_feature, add_line, add_point,
@@ -38,17 +39,22 @@ fn greet(name: &str) -> String {
 }
 
 fn main() {
+    // Native renderer bridge: mesh updates are staged here after every regen;
+    // the render plugin drains them on the main thread.
+    let app_state = {
+        let manager = std::sync::Arc::new(echi_wgpu::RenderManager::new());
+        AppState::new_with_render_manager(Some(manager))
+    };
+
     tauri::Builder::default()
         .plugin(tauri_plugin_log::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .manage(AppState::new())
+        .manage(app_state)
         .setup(|_app| {
-            #[cfg(debug_assertions)]
-            {
-                let window = _app.get_webview_window("main").unwrap();
-                window.open_devtools();
-            }
+            // wgpu viewport mode (P0): the wgpu surface covers the whole
+            // window; Vue panels live in child webviews.
+            wgpu_viewport::setup_panels(_app)?;
 
             // Recovery check: if an autosave snapshot exists and is newer than
             // the most recent opened project, set a flag the frontend can query.

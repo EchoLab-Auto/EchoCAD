@@ -3,8 +3,8 @@
 仿 SolidWorks 逻辑的桌面端 3D CAD 软件。
 
 - **后端**：Rust（几何内核、参数化模型、文件 IO、Tauri 命令）
-- **前端**：Tauri 2.0 + Vue 3 + TypeScript + Three.js
-- **平面 UI 组件**：https://github.com/EchoLab-Auto/ui-frame.git（待接入）
+- **前端**：Tauri 2.0 + Vue 3 + TypeScript
+- **3D 渲染**：wgpu 原生渲染（视口无 DOM；Vue 只负责面板 UI，见 `doc/wgpu-rendering-migration-plan.md`）
 
 ## 快速开始
 
@@ -39,13 +39,12 @@ EchoCAD/
 │   ├── echi-plugin/        # 插件 trait + 注册中心
 │   └── echi-plugin-gear/   # 示例：齿轮生成器插件
 ├── app/                    # Tauri + Vue3 应用
-│   ├── src/                # 前端源码
-│   │   ├── components/     # UnifiedViewport / ExtrudePanel / DimensionOverlay
-│   │   ├── composables/    # useThreeScene / useSketchInteraction
+│   ├── src/                # 前端源码（面板 UI）
+│   │   ├── components/     # FeatureTree / PropertiesPanel / Toolbar / 面板包装
 │   │   ├── stores/         # Pinia store
-│   │   ├── commands/       # Tauri 命令包装
-│   │   └── views/          # HomeView（主界面）
-│   └── src-tauri/          # Tauri Rust 入口（commands.rs）
+│   │   └── commands/       # Tauri 命令包装
+│   └── src-tauri/          # Tauri Rust 入口（commands.rs / wgpu_viewport.rs）
+├── crates/echi-wgpu/       # 原生 wgpu 渲染器（视口 / 拾取 / 多视口 / 剖切）
 └── doc/                    # 项目文档
     ├── architecture.md     # 0.2 架构总览
     ├── interaction-guide.md

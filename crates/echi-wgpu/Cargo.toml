@@ -1,0 +1,25 @@
+[package]
+name = "echi-wgpu"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "EchoCAD native wgpu renderer (replaces in-webview Three.js viewport)"
+
+[dependencies]
+wgpu = "30"
+raw-window-handle = "0.6"
+glam = { version = "0.33", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "1"
+log = { workspace = true }
+thiserror = { workspace = true }
+serde_json = { workspace = true }
+
+# wry_plugin integration (P0): the plugin module bridges the renderer into
+# the Tauri event loop exactly like tauri-plugin-egui does.
+tauri = { version = "2", features = ["unstable"] }
+tauri-runtime-wry = "2.11.4"
+tao = "0.35"

@@ -12,7 +12,7 @@ rust-version.workspace = true
 tauri-build = { workspace = true }
 
 [dependencies]
-tauri = { workspace = true }
+tauri = { workspace = true, features = ["unstable"] }
 tauri-plugin-log = { workspace = true }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
@@ -21,15 +21,17 @@ serde_json = { workspace = true }
 echi-core = { path = "../../crates/echi-core" }
 echi-geom = { path = "../../crates/echi-geom" }
 echi-render = { path = "../../crates/echi-render" }
+echi-wgpu = { path = "../../crates/echi-wgpu" }
 echi-io = { path = "../../crates/echi-io" }
 echi-plugin = { path = "../../crates/echi-plugin" }
 echi-plugin-gear = { path = "../../crates/echi-plugin-gear" }
 echi-plugin-cycloidal = { path = "../../crates/echi-plugin-cycloidal" }
 log = { workspace = true }
+raw-window-handle = "0.6"
 cadrum = { version = "0.8", optional = true }
 
 [features]
-default = ["mesh"]
-mesh = []
+# Native wgpu viewport is the only rendering mode now.
+default = []
 brep = ["echi-render/brep"]
 occt = ["echi-render/occt", "cadrum"]

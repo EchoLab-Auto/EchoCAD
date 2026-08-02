@@ -43,7 +43,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { useSketchStore } from "@/stores/sketch";
-import { reparentFeature } from "@/commands/sketch";
 import type { FeatureId, FeatureNode } from "@/commands/sketch";
 
 const emit = defineEmits<{
@@ -163,3 +162,103 @@ function featureIcon(type: string): string {
   return "📦"; // fallback
 }
 </script>
+
+<style scoped>
+/* `.panel`, `.err-badge` come from the global stylesheet (style.css). */
+.panel {
+  padding-top: 8px;
+}
+
+.feature-tree {
+  list-style: none;
+  font-size: 12px;
+}
+.feature-tree li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.feature-tree li:hover {
+  background: var(--bg-hover);
+}
+.feature-tree li.active {
+  background: var(--accent);
+}
+.feature-tree li.selected {
+  outline: 1px solid var(--accent-outline);
+  outline-offset: -1px;
+}
+.feature-tree li.suppressed {
+  opacity: 0.45;
+  font-style: italic;
+}
+.feature-tree li.errored {
+  background: var(--danger-bg);
+}
+.feature-tree li.errored.active {
+  background: #6a3030;
+}
+.feature-tree li.drop-target {
+  outline: 2px dashed var(--accent-outline);
+  outline-offset: -2px;
+  background: #1a3a5c;
+}
+
+.suppress-btn {
+  background: transparent;
+  border: none;
+  color: #aaa;
+  cursor: pointer;
+  font-size: 10px;
+  padding: 0;
+  line-height: 1;
+  opacity: 0.6;
+  flex-shrink: 0;
+}
+.suppress-btn:hover {
+  color: #fff;
+  opacity: 1;
+}
+.fi-arrow {
+  color: var(--border-strong);
+  font-size: 10px;
+  margin-right: 2px;
+  flex-shrink: 0;
+}
+.feature-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.fi-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.err-icon {
+  color: #ff5252;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.delete-btn {
+  margin-left: auto;
+  background: transparent;
+  border: none;
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+  opacity: 0;
+  transition: opacity 0.15s;
+  flex-shrink: 0;
+}
+.feature-tree li:hover .delete-btn {
+  opacity: 1;
+}
+.delete-btn:hover {
+  color: #ff6b6b;
+}
+</style>

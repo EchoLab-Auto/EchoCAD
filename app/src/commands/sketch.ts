@@ -110,6 +110,8 @@ export interface FeatureNode {
   /** Primary upstream feature id (Fillet/Chamfer/Shell/Pattern/Mirror target,
    *  Extrude/Revolve source sketch). Use this instead of positional heuristics. */
   target_id?: FeatureId | null;
+  /** Parent feature id for the tree hierarchy (null/absent = root). */
+  parent_id?: FeatureId | null;
 }
 
 export interface RenderMesh {
